@@ -12,14 +12,17 @@ function App() {
   const [response, setResponse] = useState(null);
   const [error, setError] = useState(null);
 
-  const handleRunSwarm = async (e) => {
+ const handleRunSwarm = async (e) => {
     e.preventDefault();
     setLoading(true);
     setError(null);
     setResponse(null);
 
+   
+    const API_BASE = process.env.REACT_APP_API_URL || "https://fleet-swarm-backend.onrender.com";
+
     try {
-      const res = await axios.post("http://localhost:8000/api/triage", {
+      const res = await axios.post(`${API_BASE}/api/triage`, {
         vehicle_id: vehicleId, location, issue_type: issueType, severity, cargo_type: cargoType
       });
       setResponse(res.data);
