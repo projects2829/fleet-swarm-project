@@ -38,7 +38,7 @@ function App() {
       if (res.ok) {
         setResponseResult(data);
       } else {
-        setError(data.detail || 'Something went wrong during swarm execution.');
+        setError(typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail) || 'Validation error from backend.');
       }
     } catch (err) {
       setError('Failed to connect to backend server. Make sure Render is online.');
@@ -110,17 +110,17 @@ function App() {
             <div className="flex justify-between items-center border-b border-gray-700 pb-3">
               <div>
                 <h3 className="text-lg font-bold text-green-400">Swarm Execution Successful</h3>
-                <p className="text-xs text-gray-400">Incident ID: {responseResult?.incident_id}</p>
+                <p className="text-xs text-gray-400">Incident ID: {String(responseResult?.incident_id || '')}</p>
               </div>
               <div className="text-right">
-                <span className="text-xs bg-blue-900 text-blue-200 px-2 py-1 rounded">Time: {responseResult?.execution_time_ms} ms</span>
+                <span className="text-xs bg-blue-900 text-blue-200 px-2 py-1 rounded">Time: {String(responseResult?.execution_time_ms || 0)} ms</span>
               </div>
             </div>
 
             <div className="bg-gray-900 p-4 rounded border border-gray-700">
               <h4 className="text-sm font-semibold text-yellow-400 mb-2">Trip Summary & Mitigation</h4>
-              <p className="text-sm text-gray-300">{responseResult?.final_resolution?.mitigation_summary}</p>
-              <p className="text-xs text-gray-500 mt-2">ERP Reference ID: {responseResult?.final_resolution?.erp_ref}</p>
+              <p className="text-sm text-gray-300">{String(responseResult?.final_resolution?.mitigation_summary || '')}</p>
+              <p className="text-xs text-gray-500 mt-2">ERP Reference ID: {String(responseResult?.final_resolution?.erp_ref || '')}</p>
             </div>
 
             <div>
@@ -129,8 +129,8 @@ function App() {
                 {responseResult?.traces?.map((trace, idx) => (
                   <div key={idx} className="bg-gray-900/80 p-3 rounded border border-gray-800 text-xs">
                     <div className="flex justify-between font-semibold text-gray-300 mb-1">
-                      <span>{trace?.agent_role} — ({trace?.step_name})</span>
-                      <span className="text-green-400">{trace?.status} ({trace?.timestamp}ms)</span>
+                      <span>{String(trace?.agent_role || '')} — ({String(trace?.step_name || '')})</span>
+                      <span className="text-green-400">{String(trace?.status || '')} ({String(trace?.timestamp || 0)}ms)</span>
                     </div>
                     <pre className="text-gray-400 overflow-x-auto whitespace-pre-wrap mt-1">
                       {JSON.stringify(trace?.output_payload, null, 2)}
