@@ -38,7 +38,12 @@ function App() {
       if (res.ok) {
         setResponseResult(data);
       } else {
-        setError(typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail) || 'Validation error from backend.');
+        // Safe error extraction to prevent object rendering crash
+        let errDetail = data.detail;
+        if (typeof errDetail === 'object') {
+          errDetail = JSON.stringify(errDetail);
+        }
+        setError(errDetail || 'Validation error from backend (422).');
       }
     } catch (err) {
       setError('Failed to connect to backend server. Make sure Render is online.');
@@ -101,7 +106,7 @@ function App() {
 
         {error && (
           <div className="bg-red-900/50 border border-red-700 text-red-200 p-4 rounded mb-6 text-sm">
-            {error}
+            {String(error)}
           </div>
         )}
 
