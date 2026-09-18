@@ -4,6 +4,7 @@ import axios from 'axios';
 function App() {
   const [vehicleId, setVehicleId] = useState("BK-18W-4021");
   const [location, setLocation] = useState("NH-31 Patna-Bakhtiyarpur Stretch");
+  const [destination, setDestination] = useState("Patna Central Depot / Warehouse B");
   const [issueType, setIssueType] = useState("breakdown");
   const [severity, setSeverity] = useState("CRITICAL");
   const [cargoType, setCargoType] = useState("Grade-A Ordinary Portland Cement");
@@ -12,18 +13,22 @@ function App() {
   const [response, setResponse] = useState(null);
   const [error, setError] = useState(null);
 
- const handleRunSwarm = async (e) => {
+  const handleRunSwarm = async (e) => {
     e.preventDefault();
     setLoading(true);
     setError(null);
     setResponse(null);
 
-   
     const API_BASE = process.env.REACT_APP_API_URL || "https://fleet-swarm-backend.onrender.com";
 
     try {
       const res = await axios.post(`${API_BASE}/api/triage`, {
-        vehicle_id: vehicleId, location, issue_type: issueType, severity, cargo_type: cargoType
+        vehicle_id: vehicleId, 
+        location, 
+        destination, 
+        issue_type: issueType, 
+        severity, 
+        cargo_type: cargoType
       });
       setResponse(res.data);
     } catch (err) {
@@ -54,8 +59,12 @@ function App() {
               <input type="text" value={vehicleId} onChange={(e) => setVehicleId(e.target.value)} style={{ width: '100%', background: '#020617', border: '1px solid #334155', borderRadius: '8px', padding: '10px', color: '#fff', fontSize: '14px' }} required />
             </div>
             <div>
-              <label style={{ display: 'block', fontSize: '12px', color: '#94a3b8', marginBottom: '4px' }}>Highway / Location</label>
+              <label style={{ display: 'block', fontSize: '12px', color: '#94a3b8', marginBottom: '4px' }}>Highway / Current Location</label>
               <input type="text" value={location} onChange={(e) => setLocation(e.target.value)} style={{ width: '100%', background: '#020617', border: '1px solid #334155', borderRadius: '8px', padding: '10px', color: '#fff', fontSize: '14px' }} required />
+            </div>
+            <div>
+              <label style={{ display: 'block', fontSize: '12px', color: '#94a3b8', marginBottom: '4px' }}>Destination</label>
+              <input type="text" value={destination} onChange={(e) => setDestination(e.target.value)} style={{ width: '100%', background: '#020617', border: '1px solid #334155', borderRadius: '8px', padding: '10px', color: '#fff', fontSize: '14px' }} required />
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
               <div>
