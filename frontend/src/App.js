@@ -132,7 +132,7 @@ function App() {
               <div className="space-y-3">
                 {responseResult?.traces?.map((trace, idx) => (
                   <div key={idx} className="bg-gray-900/80 p-3 rounded border border-gray-800 text-xs">
-                    <div className="flex justify-heading font-semibold text-gray-300 mb-1">
+                    <div className="flex justify-between font-semibold text-gray-300 mb-1">
                       <span>{String(trace?.agent_role || '')} — ({String(trace?.step_name || '')})</span>
                       <span className="text-green-400">{String(trace?.status || '')} ({String(trace?.timestamp || 0)}ms)</span>
                     </div>
