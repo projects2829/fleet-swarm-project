@@ -1,139 +1,151 @@
 import React, { useState } from 'react';
-import axios from 'axios';
+import './App.css';
 
 function App() {
-  const [vehicleId, setVehicleId] = useState("BK-18W-4021");
-  const [location, setLocation] = useState("NH-31 Patna-Bakhtiyarpur Stretch");
-  const [destination, setDestination] = useState("Patna Central Depot / Warehouse B");
-  const [issueType, setIssueType] = useState("breakdown");
-  const [severity, setSeverity] = useState("CRITICAL");
-  const [cargoType, setCargoType] = useState("Grade-A Ordinary Portland Cement");
-  
+  const [formData, setFormData] = useState({
+    vehicle_id: 'TRUCK-BR-01-9922',
+    location: 'Zero Mile, Patna',
+    destination: 'Hajipur Industrial Area Workshop',
+    issue_type: 'Engine Overheat & Transmission Breakdown',
+    severity: 'CRITICAL',
+    cargo_type: 'Heavy Construction Steel Rods'
+  });
+
   const [loading, setLoading] = useState(false);
-  const [response, setResponse] = useState(null);
+  const [responseResult, setResponseResult] = useState(null);
   const [error, setError] = useState(null);
 
-  const handleRunSwarm = async (e) => {
+  const handleChange = (e) => {
+    setFormData({ ...formData, [e.target.name]: e.target.value });
+  };
+
+  const handleSubmit = async (e) => {
     e.preventDefault();
     setLoading(true);
     setError(null);
-    setResponse(null);
+    setResponseResult(null);
 
-    const API_BASE = process.env.REACT_APP_API_URL || "https://fleet-swarm-backend.onrender.com";
+    const API_URL = process.env.REACT_APP_API_URL || 'https://fleet-swarm-backend.onrender.com';
 
     try {
-      const res = await axios.post(`${API_BASE}/api/triage`, {
-        vehicle_id: vehicleId, 
-        location, 
-        destination, 
-        issue_type: issueType, 
-        severity, 
-        cargo_type: cargoType
+      const res = await fetch(`${API_URL}/api/triage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(formData)
       });
-      setResponse(res.data);
+
+      const data = await res.json();
+      if (res.ok) {
+        setResponseResult(data);
+      } else {
+        let errDetail = data.detail;
+        if (typeof errDetail === 'object') {
+          errDetail = JSON.stringify(errDetail);
+        }
+        setError(errDetail || 'Validation error from backend (422).');
+      }
     } catch (err) {
-      setError(err.response?.data?.detail || err.message || "Failed to connect API.");
+      setError('Failed to connect to backend server. Make sure Render is online.');
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div style={{ minHeight: '100vh', backgroundColor: '#020617', color: '#f8fafc', padding: '24px', fontFamily: 'sans-serif' }}>
-      <header style={{ maxWidth: '1200px', margin: '0 auto', display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingBottom: '20px', borderBottom: '1px solid #1e293b' }}>
-        <div>
-          <h1 style={{ fontSize: '20px', fontWeight: 'bold', margin: 0 }}>AUTONOMOUS FLEET SWARM COMMAND</h1>
-          <p style={{ fontSize: '12px', color: '#94a3b8', margin: '4px 0 0 0' }}>Deterministic Multi-Agent Self-Healing Logistics Engine</p>
-        </div>
-        <div style={{ padding: '6px 12px', background: 'rgba(16, 185, 129, 0.1)', border: '1px solid rgba(16, 185, 129, 0.3)', borderRadius: '20px', color: '#34d399', fontSize: '12px' }}>
-          ● Swarm Cluster: Healthy
-        </div>
-      </header>
+    <div className="min-h-screen bg-gray-900 text-white p-6">
+      <div className="max-w-4xl mx-auto">
+        <header className="mb-8 text-center">
+          <h1 className="text-3xl font-bold text-blue-400">Hyper-Local Fleet Swarm Intelligence</h1>
+          <p className="text-gray-400 text-sm mt-1">Real-Time Google Maps Dynamic Routing & Multi-Agent Orchestration</p>
+        </header>
 
-      <main style={{ maxWidth: '1200px', margin: '24px auto 0 auto', display: 'grid', gridTemplateColumns: '1fr 2fr', gap: '24px' }}>
-        <div style={{ background: '#0f172a', border: '1px solid #1e293b', borderRadius: '16px', padding: '24px' }}>
-          <h2 style={{ fontSize: '16px', fontWeight: '600', marginBottom: '16px', color: '#f1f5f9' }}>Inject Bottleneck / Incident</h2>
-          <form onSubmit={handleRunSwarm} style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+        <form onSubmit={handleSubmit} className="bg-gray-800 p-6 rounded-lg shadow-xl space-y-4 mb-8 border border-gray-700">
+          <h2 className="text-xl font-semibold text-blue-300 border-b border-gray-700 pb-2">Emergency Dispatch Incident Input</h2>
+          
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
-              <label style={{ display: 'block', fontSize: '12px', color: '#94a3b8', marginBottom: '4px' }}>Heavy Fleet Unit ID</label>
-              <input type="text" value={vehicleId} onChange={(e) => setVehicleId(e.target.value)} style={{ width: '100%', background: '#020617', border: '1px solid #334155', borderRadius: '8px', padding: '10px', color: '#fff', fontSize: '14px' }} required />
-            </div>
-            <div>
-              <label style={{ display: 'block', fontSize: '12px', color: '#94a3b8', marginBottom: '4px' }}>Highway / Current Location</label>
-              <input type="text" value={location} onChange={(e) => setLocation(e.target.value)} style={{ width: '100%', background: '#020617', border: '1px solid #334155', borderRadius: '8px', padding: '10px', color: '#fff', fontSize: '14px' }} required />
+              <label className="block text-xs font-medium text-gray-400">Vehicle ID</label>
+              <input type="text" name="vehicle_id" value={formData.vehicle_id} onChange={handleChange} className="w-full mt-1 p-2 bg-gray-900 border border-gray-700 rounded text-sm" required />
             </div>
             <div>
-              <label style={{ display: 'block', fontSize: '12px', color: '#94a3b8', marginBottom: '4px' }}>Destination</label>
-              <input type="text" value={destination} onChange={(e) => setDestination(e.target.value)} style={{ width: '100%', background: '#020617', border: '1px solid #334155', borderRadius: '8px', padding: '10px', color: '#fff', fontSize: '14px' }} required />
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
-              <div>
-                <label style={{ display: 'block', fontSize: '12px', color: '#94a3b8', marginBottom: '4px' }}>Issue Type</label>
-                <select value={issueType} onChange={(e) => setIssueType(e.target.value)} style={{ width: '100%', background: '#020617', border: '1px solid #334155', borderRadius: '8px', padding: '10px', color: '#fff', fontSize: '14px' }}>
-                  <option value="breakdown">Breakdown</option>
-                  <option value="route_blockage">Blockage</option>
-                  <option value="material_delay">Delay</option>
-                </select>
-              </div>
-              <div>
-                <label style={{ display: 'block', fontSize: '12px', color: '#94a3b8', marginBottom: '4px' }}>Severity</label>
-                <select value={severity} onChange={(e) => setSeverity(e.target.value)} style={{ width: '100%', background: '#020617', border: '1px solid #334155', borderRadius: '8px', padding: '10px', color: '#fff', fontSize: '14px' }}>
-                  <option value="CRITICAL">Critical</option>
-                  <option value="MEDIUM">Medium</option>
-                </select>
-              </div>
-            </div>
-            <div>
-              <label style={{ display: 'block', fontSize: '12px', color: '#94a3b8', marginBottom: '4px' }}>Cargo Type</label>
-              <input type="text" value={cargoType} onChange={(e) => setCargoType(e.target.value)} style={{ width: '100%', background: '#020617', border: '1px solid #334155', borderRadius: '8px', padding: '10px', color: '#fff', fontSize: '14px' }} required />
-            </div>
-            <button type="submit" disabled={loading} style={{ marginTop: '8px', width: '100%', padding: '12px', background: '#2563eb', color: '#fff', border: 'none', borderRadius: '8px', fontWeight: 'bold', cursor: 'pointer' }}>
-              {loading ? "Executing Swarm Triage..." : "Dispatch Agent Swarm"}
-            </button>
-          </form>
-          {error && <div style={{ marginTop: '12px', padding: '10px', background: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.3)', borderRadius: '8px', color: '#f87171', fontSize: '12px' }}>{error}</div>}
-        </div>
-
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '14px' }}>
-            <div style={{ background: '#0f172a', border: '1px solid #1e293b', borderRadius: '12px', padding: '16px' }}>
-              <p style={{ fontSize: '12px', color: '#94a3b8', margin: 0 }}>Incident Reference</p>
-              <p style={{ fontSize: '16px', fontWeight: 'bold', color: '#fff', margin: '6px 0 0 0' }}>{response ? response.incident_id : "---"}</p>
-            </div>
-            <div style={{ background: '#0f172a', border: '1px solid #1e293b', borderRadius: '12px', padding: '16px' }}>
-              <p style={{ fontSize: '12px', color: '#94a3b8', margin: 0 }}>Deterministic Latency</p>
-              <p style={{ fontSize: '16px', fontWeight: 'bold', color: '#60a5fa', margin: '6px 0 0 0' }}>{response ? `${response.execution_time_ms} ms` : "---"}</p>
-            </div>
-            <div style={{ background: '#0f172a', border: '1px solid #1e293b', borderRadius: '12px', padding: '16px' }}>
-              <p style={{ fontSize: '12px', color: '#94a3b8', margin: 0 }}>Validated Steps</p>
-              <p style={{ fontSize: '16px', fontWeight: 'bold', color: '#34d399', margin: '6px 0 0 0' }}>{response ? response.deterministic_steps_executed : "---"}</p>
+              <label className="block text-xs font-medium text-gray-400">Severity Level</label>
+              <select name="severity" value={formData.severity} onChange={handleChange} className="w-full mt-1 p-2 bg-gray-900 border border-gray-700 rounded text-sm">
+                <option value="CRITICAL">CRITICAL</option>
+                <option value="MODERATE">MODERATE</option>
+              </select>
             </div>
           </div>
 
-          <div style={{ background: '#0f172a', border: '1px solid #1e293b', borderRadius: '16px', padding: '24px' }}>
-            <h3 style={{ fontSize: '16px', fontWeight: '600', marginBottom: '16px', color: '#f1f5f9' }}>Agent Execution Graph & Trace Logs</h3>
-            {!response ? (
-              <div style={{ textAlign: 'center', padding: '40px', border: '2px dashed #1e293b', borderRadius: '12px', color: '#64748b', fontSize: '14px' }}>
-                No active swarm traces. Trigger an incident from the left panel.
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-xs font-medium text-gray-400">1. Breakdown Location (Origin Start)</label>
+              <input type="text" name="location" value={formData.location} onChange={handleChange} placeholder="e.g., Zero Mile, Patna" className="w-full mt-1 p-2 bg-gray-900 border border-gray-700 rounded text-sm" required />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-400">2. Destination Workshop / Hub (End)</label>
+              <input type="text" name="destination" value={formData.destination} onChange={handleChange} placeholder="e.g., Hajipur Industrial Area" className="w-full mt-1 p-2 bg-gray-900 border border-gray-700 rounded text-sm" required />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-xs font-medium text-gray-400">Issue Type</label>
+              <input type="text" name="issue_type" value={formData.issue_type} onChange={handleChange} className="w-full mt-1 p-2 bg-gray-900 border border-gray-700 rounded text-sm" required />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-400">Cargo Type</label>
+              <input type="text" name="cargo_type" value={formData.cargo_type} onChange={handleChange} className="w-full mt-1 p-2 bg-gray-900 border border-gray-700 rounded text-sm" required />
+            </div>
+          </div>
+
+          <button type="submit" disabled={loading} className="w-full bg-blue-600 hover:bg-blue-500 text-white font-medium py-2 rounded transition">
+            {loading ? 'Orchestrating Swarm via Google Maps...' : 'Deploy Fleet Swarm Agents'}
+          </button>
+        </form>
+
+        {error && (
+          <div className="bg-red-900/50 border border-red-700 text-red-200 p-4 rounded mb-6 text-sm">
+            {String(error)}
+          </div>
+        )}
+
+        {responseResult && (
+          <div className="bg-gray-800 p-6 rounded-lg shadow-xl border border-gray-700 space-y-6">
+            <div className="flex justify-between items-center border-b border-gray-700 pb-3">
+              <div>
+                <h3 className="text-lg font-bold text-green-400">Swarm Execution Successful</h3>
+                <p className="text-xs text-gray-400">Incident ID: {String(responseResult?.incident_id || '')}</p>
               </div>
-            ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                {response.traces.map((trace, index) => (
-                  <div key={index} style={{ background: '#020617', border: '1px solid #1e293b', borderRadius: '10px', padding: '14px' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', fontSize: '13px' }}>
-                      <span style={{ color: '#60a5fa', fontWeight: 'bold' }}>{trace.agent_role} - {trace.step_name}</span>
-                      <span style={{ color: '#34d399' }}>{trace.timestamp} ms ({trace.status})</span>
+              <div className="text-right">
+                <span className="text-xs bg-blue-900 text-blue-200 px-2 py-1 rounded">Time: {String(responseResult?.execution_time_ms || 0)} ms</span>
+              </div>
+            </div>
+
+            <div className="bg-gray-900 p-4 rounded border border-gray-700">
+              <h4 className="text-sm font-semibold text-yellow-400 mb-2">Trip Summary & Mitigation</h4>
+              <p className="text-sm text-gray-300">{String(responseResult?.final_resolution?.mitigation_summary || '')}</p>
+              <p className="text-xs text-gray-500 mt-2">ERP Reference ID: {String(responseResult?.final_resolution?.erp_ref || '')}</p>
+            </div>
+
+            <div>
+              <h4 className="text-sm font-semibold text-blue-300 mb-3">Multi-Agent Pipeline Steps</h4>
+              <div className="space-y-3">
+                {responseResult?.traces?.map((trace, idx) => (
+                  <div key={idx} className="bg-gray-900/80 p-3 rounded border border-gray-800 text-xs">
+                    <div className="flex justify-heading font-semibold text-gray-300 mb-1">
+                      <span>{String(trace?.agent_role || '')} — ({String(trace?.step_name || '')})</span>
+                      <span className="text-green-400">{String(trace?.status || '')} ({String(trace?.timestamp || 0)}ms)</span>
                     </div>
-                    <pre style={{ fontSize: '11px', color: '#94a3b8', background: '#0f172a', padding: '10px', borderRadius: '6px', overflowX: 'auto', margin: 0 }}>
-                      {JSON.stringify(trace.output_payload, null, 2)}
+                    <pre className="text-gray-400 overflow-x-auto whitespace-pre-wrap mt-1">
+                      {JSON.stringify(trace?.output_payload, null, 2)}
                     </pre>
                   </div>
                 ))}
               </div>
-            )}
+            </div>
           </div>
-        </div>
-      </main>
+        )}
+      </div>
     </div>
   );
 }
