@@ -49,9 +49,14 @@ function App() {
 
   const routingTrace = responseResult?.traces?.find(t => t.step_name === 'Routing_Recalculation')?.output_payload;
   const procurementTrace = responseResult?.traces?.find(t => t.step_name === 'Procurement_Vendor_Negotiation')?.output_payload;
+  const supervisorTrace = responseResult?.traces?.find(t => t.step_name === 'Supervisor_Triage')?.output_payload;
 
-  const nearestHub = procurementTrace?.nearest_operational_hub || 'Authorized Service Hub';
-  const allNearbyHubs = procurementTrace?.all_detected_hubs || [];
+  const nearestHub = procurementTrace?.nearest_operational_hub || supervisorTrace?.destination_workshop || 'Authorized Service Hub';
+  
+  // Safe extraction of all nearby service centers list from any available trace payload
+  const allNearbyHubs = procurementTrace?.all_nearby_service_centers || 
+                        supervisorTrace?.all_nearby_service_centers || 
+                        responseResult?.final_resolution?.all_available_service_centers || [];
 
   const googleMapsRouteUrl = `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(formData.location)}&destination=${encodeURIComponent(formData.destination)}&waypoints=${encodeURIComponent(nearestHub)}&travelmode=driving`;
   const googleMapsHubPinUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(nearestHub)}`;
@@ -132,7 +137,7 @@ function App() {
               </div>
 
               <h3 className="text-lg font-bold text-white mb-3 flex items-center gap-2">
-                <span>📍</span> All Nearby Authorized Service Centers (Numbered List 1 to N)
+                <span>📍</span> Route & Nearby Authorized Service Centers (1 to N)
               </h3>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-5">
@@ -146,7 +151,7 @@ function App() {
 
                 <div className="bg-slate-950/80 p-4 rounded-lg border border-slate-800 flex flex-col justify-between">
                   <div>
-                    <span className="text-xs text-slate-400 block uppercase tracking-wider mb-1">Primary Nearest Hub</span>
+                    <span className="text-xs text-slate-400 block uppercase tracking-wider mb-1">Primary Nearest Hub (Direct Pin)</span>
                     <div className="text-sm font-bold text-emerald-400 truncate">
                       {nearestHub}
                     </div>
@@ -165,14 +170,21 @@ function App() {
 
               {/* Numbered List of All Detected Service Centers */}
               <div className="bg-slate-900/90 p-4 rounded-lg border border-slate-800 mb-5">
-                <strong className="text-white block mb-2 text-xs uppercase tracking-wider text-blue-400">Detected Authorized Service Centers (Numbered List):</strong>
-                <ul className="space-y-2 text-xs text-slate-300">
-                  {allNearbyHubs.map((hubName, idx) => (
-                    <li key={idx} className="bg-slate-950 p-2.5 rounded border border-slate-800/60 font-mono flex items-start gap-2">
-                      <span className="text-emerald-400 font-bold">{hubName}</span>
-                    </li>
-                  ))}
-                </ul>
+                <strong className="text-white block mb-3 text-xs uppercase tracking-wider text-blue-400">
+                  Detected Authorized Service Centers (Numbered List):
+                </strong>
+                {allNearbyHubs.length > 0 ? (
+                  <ul className="space-y-2.5 text-xs text-slate-300">
+                    {allNearbyHubs.map((hubName, idx) => (
+                      <li key={idx} className="bg-slate-950 p-3 rounded-lg border border-slate-800/80 font-mono flex items-start gap-3 shadow-inner">
+                        <span className="text-emerald-400 font-bold text-sm bg-emerald-950/50 px-2 py-0.5 rounded border border-emerald-800/40">{idx + 1}</span>
+                        <span className="text-slate-200 leading-relaxed self-center">{typeof hubName === 'string' ? hubName.replace(/^\d+\.\s*/, '') : JSON.stringify(hubName)}</span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="text-xs text-slate-500 italic">No alternative service centers returned in this query batch.</p>
+                )}
               </div>
 
               <div className="bg-slate-900/90 p-3 rounded-lg border border-slate-800 mb-5 text-xs text-slate-300">
