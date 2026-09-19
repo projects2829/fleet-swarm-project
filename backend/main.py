@@ -171,7 +171,7 @@ class HyperLocalSwarmOrchestrator:
         detected_hubs = service_intel.get("all_detected_hubs", [])
 
         clean_vid = self.incident.vehicle_id.strip().upper()
-        assigned_phone = FLEET_WHATSAPP_MAPPING.get(clean_vid, "+919835011111")
+        assigned_phone = FLEET_WHATSAPP_MAPPING.get(clean_vid, "+916209313108")
 
         # Initialize HITL approval state in memory
         APPROVAL_STATES[self.incident_id] = "PENDING_MANAGER_APPROVAL"
