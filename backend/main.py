@@ -2,13 +2,14 @@ import os
 import time
 import uuid
 import re
+import json
 from typing import List, Dict, Any, Optional
 import requests
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-app = FastAPI(title="Autonomous Enterprise Fleet Agentic AI & RAG Engine", version="4.0.0")
+app = FastAPI(title="Autonomous Enterprise Fleet Agentic AI & RAG Engine", version="4.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -29,12 +30,14 @@ FLEET_WHATSAPP_MAPPING = {
 
 # In-memory storage for HITL approval states and active contexts
 APPROVAL_STATES = {}
-INCIDENT_CONTEXTS = {}
+INCIDENT_CONTEXTS = {}   # phone -> incident_id
+INCIDENT_DETAILS = {}    # incident_id -> full context dict (for AI replies)
 
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 WHATSAPP_PHONE_ID = os.getenv("PHONE_NUMBER_ID", "1340284595815318")
 VERIFY_TOKEN = "fleet_secret_token_2026"
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 class IncidentInput(BaseModel):
     vehicle_id: str
@@ -62,6 +65,100 @@ class TriageResponse(BaseModel):
     final_resolution: Dict[str, Any]
 
 
+def send_whatsapp_text_reply(to_phone: str, text: str):
+    """Sends a plain text reply back to the manager on WhatsApp."""
+    if not WHATSAPP_TOKEN or WHATSAPP_TOKEN == "YOUR_TOKEN":
+        return {"status": "simulated_reply", "text": text}
+    url = f"https://graph.facebook.com/v26.0/{WHATSAPP_PHONE_ID}/messages"
+    headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
+    body = {
+        "messaging_product": "whatsapp",
+        "to": to_phone,
+        "type": "text",
+        "text": {"body": text}
+    }
+    res = requests.post(url, json=body, headers=headers, timeout=10)
+    return {"status_code": res.status_code, "response": res.json() if res.content else {}}
+
+
+def call_ai_agent(manager_text: str, incident_ctx: dict) -> dict:
+    """
+    Sends the manager's WhatsApp reply + incident context to Gemini API,
+    classifies intent, and drafts a short WhatsApp reply in English.
+    """
+    fallback = _keyword_fallback(manager_text)
+
+    if not GEMINI_API_KEY:
+        return fallback
+
+    system_prompt = (
+        "You are a professional fleet operations assistant replying to a manager on WhatsApp. "
+        "The manager just sent a free-text instruction about a vehicle breakdown incident. "
+        "Classify their intent into exactly one of: APPROVED_AND_DISPATCHED, "
+        "APPROVED_LOCAL_MECHANIC_REROUTED, REJECTED_REROUTING, or CUSTOM_INSTRUCTION_LOGGED. "
+        "Then write a short (1-2 sentence) professional WhatsApp reply strictly in English, "
+        "confirming what will happen next. "
+        "Respond ONLY as valid JSON in this exact format: {\"decision\": \"...\", \"reply_text\": \"...\"}."
+    )
+
+    user_prompt = (
+        f"Incident context: vehicle={incident_ctx.get('vehicle_id')}, "
+        f"issue={incident_ctx.get('issue_type')}, hub={incident_ctx.get('hub')}, "
+        f"recommended_part={incident_ctx.get('recommended_part')}.\n"
+        f"Manager's WhatsApp message: \"{manager_text}\""
+    )
+
+    try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+        payload = {
+            "contents": [
+                {
+                    "parts": [
+                        {"text": system_prompt + "\n\n" + user_prompt}
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.2,
+                "response_mime_type": "application/json"
+            }
+        }
+        res = requests.post(url, json=payload, timeout=15)
+        res.raise_for_status()
+        data = res.json()
+        content = data["candidates"][0]["content"]["parts"][0]["text"]
+        parsed = json.loads(content)
+        if parsed.get("decision") and parsed.get("reply_text"):
+            return parsed
+        return fallback
+    except Exception:
+        return fallback
+
+
+def _keyword_fallback(text_body: str) -> dict:
+    t = text_body.lower()
+    if "local" in t or "fatuha" in t or "sasta" in t or "bypass" in t:
+        return {
+            "decision": "APPROVED_LOCAL_MECHANIC_REROUTED",
+            "reply_text": "✅ Understood — the vehicle has been rerouted to the local mechanic."
+        }
+    elif "ok" in t or "haan" in t or "kardo" in t or "approve" in t:
+        return {
+            "decision": "APPROVED_AND_DISPATCHED",
+            "reply_text": "✅ Repair approved, dispatch sequence has been initiated."
+        }
+    elif "cancel" in t or "reject" in t or "mat" in t:
+        return {
+            "decision": "REJECTED_REROUTING",
+            "reply_text": "❌ Request rejected, vehicle rerouting initiated."
+        }
+    else:
+        return {
+            "decision": f"CUSTOM_INSTRUCTION_LOGGED: {text_body}",
+            "reply_text": "📝 Your instruction has been recorded, the team will follow up."
+        }
+
+
 class EnterpriseAgenticRAGOrchestrator:
     def __init__(self, incident: IncidentInput):
         self.incident = incident
@@ -71,10 +168,6 @@ class EnterpriseAgenticRAGOrchestrator:
         self.step_counter = 0
 
     def _run_agentic_rag_diagnostics(self):
-        """
-        Simulated Enterprise Agentic RAG Pipeline that queries heavy commercial 
-        vehicle diagnostic vectors for exact parts and repair directives.
-        """
         issue = self.incident.issue_type.lower()
         if "overheat" in issue or "temperature" in issue:
             return {
@@ -207,6 +300,12 @@ class EnterpriseAgenticRAGOrchestrator:
 
         APPROVAL_STATES[self.incident_id] = "PENDING_MANAGER_APPROVAL"
         INCIDENT_CONTEXTS[assigned_phone] = self.incident_id
+        INCIDENT_DETAILS[self.incident_id] = {
+            "vehicle_id": self.incident.vehicle_id,
+            "issue_type": self.incident.issue_type,
+            "hub": service_intel["hub"],
+            "recommended_part": rag_intel["recommended_part"]
+        }
 
         # 1. Supervisor Agent Trace
         self.step_counter += 1
@@ -293,8 +392,8 @@ async def send_whatsapp_interactive(payload: dict):
     recommended_part = payload.get("recommended_part", "Standard Spare Kit")
 
     cleaned_phone = re.sub(r'\D', '', raw_phone)
-    token = os.getenv("WHATSAPP_TOKEN")
-    phone_id = os.getenv("PHONE_NUMBER_ID", "1340284595815318")
+    token = WHATSAPP_TOKEN
+    phone_id = WHATSAPP_PHONE_ID
 
     if token and token != "YOUR_TOKEN":
         url = f"https://graph.facebook.com/v26.0/{phone_id}/messages"
@@ -376,27 +475,24 @@ async def whatsapp_webhook(request: Request):
                 if "APPROVE_" in payload_id:
                     inc_id = payload_id.split("APPROVE_")[1]
                     APPROVAL_STATES[inc_id] = "APPROVED_AND_DISPATCHED"
+                    send_whatsapp_text_reply(sender_phone, "✅ Repair approved successfully — dispatch process has been initiated.")
                     return {"status": "success", "action": "Approved via button click."}
                 elif "REJECT_" in payload_id:
                     inc_id = payload_id.split("REJECT_")[1]
                     APPROVAL_STATES[inc_id] = "REJECTED_REROUTING"
+                    send_whatsapp_text_reply(sender_phone, "❌ Repair rejected — vehicle rerouting has been initiated.")
                     return {"status": "success", "action": "Rejected via button click."}
             
-            # Case B: Conversational LLM Natural Language Text Response
+            # Case B: Conversational LLM / Gemini Natural Language Text Response
             elif msg.get("type") == "text":
-                text_body = msg["text"].get("body", "").lower()
-                # Find active incident for this sender phone
+                text_body = msg["text"].get("body", "")
                 for phone, inc_id in INCIDENT_CONTEXTS.items():
                     if phone in sender_phone or sender_phone in phone:
-                        if "local" in text_body or "fatuha" in text_body or "sasta" in text_body or "bypass" in text_body:
-                            APPROVAL_STATES[inc_id] = "APPROVED_LOCAL_MECHANIC_REROUTED"
-                        elif "ok" in text_body or "haan" in text_body or "kardo" in text_body or "approve" in text_body:
-                            APPROVAL_STATES[inc_id] = "APPROVED_AND_DISPATCHED"
-                        elif "cancel" in text_body or "reject" in text_body or "mat" in text_body:
-                            APPROVAL_STATES[inc_id] = "REJECTED_REROUTING"
-                        else:
-                            APPROVAL_STATES[inc_id] = f"CUSTOM_INSTRUCTION_LOGGED: {text_body}"
-                        return {"status": "success", "action": "Natural language intent parsed by LLM agent."}
+                        incident_ctx = INCIDENT_DETAILS.get(inc_id, {})
+                        ai_result = call_ai_agent(text_body, incident_ctx)
+                        APPROVAL_STATES[inc_id] = ai_result["decision"]
+                        send_whatsapp_text_reply(sender_phone, ai_result["reply_text"])
+                        return {"status": "success", "action": "AI agent replied.", "decision": ai_result["decision"]}
     except Exception as e:
         return {"status": "error", "details": str(e)}
 
@@ -404,4 +500,4 @@ async def whatsapp_webhook(request: Request):
 
 @app.get("/api/health")
 async def health_check():
-    return {"status": "online", "engine": "Enterprise Agentic AI RAG & Swarm Orchestrator v4.0.0"}
+    return {"status": "online", "engine": "Enterprise Agentic AI RAG & Swarm Orchestrator v4.1.0"}
