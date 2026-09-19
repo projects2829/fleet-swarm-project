@@ -51,8 +51,11 @@ function App() {
   const routingTrace = responseResult?.traces?.find(t => t.step_name === 'Routing_Recalculation')?.output_payload;
   const procurementTrace = responseResult?.traces?.find(t => t.step_name === 'Procurement_Vendor_Negotiation')?.output_payload;
 
-  // Google Maps Directions URL Generator
-  const googleMapsUrl = `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(formData.location)}&destination=${encodeURIComponent(formData.destination)}&travelmode=driving`;
+  // Hub name extraction for Google Maps Waypoints
+  const nearestHub = procurementTrace?.nearest_operational_hub || 'Zero Mile Central Storage Depot, Patna';
+
+  // Enhanced Google Maps Multi-Stop Directions URL (Origin -> Hub -> Destination)
+  const googleMapsUrl = `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(formData.location)}&destination=${encodeURIComponent(formData.destination)}&waypoints=${encodeURIComponent(nearestHub)}&travelmode=driving`;
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 p-4 md:p-8 font-sans">
@@ -127,11 +130,11 @@ function App() {
             {/* Interactive Route & Nearest Operational Hub Card */}
             <div className="bg-gradient-to-br from-slate-900 to-slate-950 border border-blue-500/30 rounded-xl p-6 shadow-2xl relative overflow-hidden">
               <div className="absolute top-0 right-0 bg-blue-600 text-white text-[10px] font-bold px-3 py-1 rounded-bl-xl uppercase tracking-wider">
-                Live Google Maps Route
+                Live Google Maps Multi-Stop Route
               </div>
 
               <h3 className="text-lg font-bold text-white mb-3 flex items-center gap-2">
-                <span>📍</span> Hyper-Accurate Alternative Route & Hub Navigation
+                <span>📍</span> Route, Waypoints & Hub Navigation
               </h3>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-5">
@@ -144,9 +147,9 @@ function App() {
                 </div>
 
                 <div className="bg-slate-950/80 p-4 rounded-lg border border-slate-800">
-                  <span className="text-xs text-slate-400 block uppercase tracking-wider mb-1">Nearest Operational Hub</span>
+                  <span className="text-xs text-slate-400 block uppercase tracking-wider mb-1">Nearest Operational Hub (Waypoint)</span>
                   <div className="text-sm font-bold text-emerald-400">
-                    {procurementTrace?.nearest_operational_hub || 'Central Storage Depot Patna'}
+                    {nearestHub}
                   </div>
                   <p className="text-xs text-slate-300 mt-1">{procurementTrace?.inventory_status || 'Stock locked 100%'}</p>
                 </div>
@@ -157,14 +160,14 @@ function App() {
                 <p className="text-slate-400 font-mono">{routingTrace?.hyper_accurate_alternative_route || 'Direct Corridor Route'}</p>
               </div>
 
-              {/* Direct Open in Google Maps Button */}
+              {/* Direct Multi-Stop Open in Google Maps Button */}
               <a 
                 href={googleMapsUrl} 
                 target="_blank" 
                 rel="noopener noreferrer" 
                 className="block text-center w-full bg-emerald-600 hover:bg-emerald-500 text-white font-semibold py-3 px-4 rounded-lg transition shadow-lg shadow-emerald-600/20 text-sm flex items-center justify-center gap-2"
               >
-                <span>🗺️</span> Open Full Route & Navigation in Google Maps
+                <span>🗺️</span> Open Route with Hub Waypoint in Google Maps
               </a>
             </div>
 
