@@ -8,7 +8,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-app = FastAPI(title="Hyper-Local Fleet Swarm Intelligence Engine", version="3.6.2")
+app = FastAPI(title="Hyper-Local Fleet Swarm Intelligence Engine", version="3.7.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -17,6 +17,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Fleet Unit ID to WhatsApp Number mapping dictionary
+FLEET_WHATSAPP_MAPPING = {
+    "BR01GP9621": "+916209313108",
+    "BR01GM7465": "+916209313108",
+    "BR01GP0756": "+916209313108",
+    "BR01GP0757": "+916209313108",
+    "BR01GP8148": "+916209313108"
+}
 
 class IncidentInput(BaseModel):
     vehicle_id: str
@@ -38,6 +47,7 @@ class TriageResponse(BaseModel):
     status: str
     execution_time_ms: float
     deterministic_steps_executed: int
+    assigned_whatsapp_number: str
     traces: List[AgentTrace]
     final_resolution: Dict[str, Any]
 
@@ -79,18 +89,12 @@ class HyperLocalSwarmOrchestrator:
         return None
 
     def _get_heavy_service_center_intelligence(self):
-        """Fetches authorized Tata CV & Eicher Service Centers and selects the closest one to breakdown point"""
         raw_hubs = []
-        
         if GOOGLE_MAPS_API_KEY:
             places_url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
-            # Extract main area/city keyword from location for precise local search
             location_query = self.incident.location.split(",")[0].strip()
             query_str = f"Tata commercial vehicle service center OR Eicher workshop near {location_query}, Patna"
-            params = {
-                "query": query_str,
-                "key": GOOGLE_MAPS_API_KEY
-            }
+            params = {"query": query_str, "key": GOOGLE_MAPS_API_KEY}
             try:
                 response = requests.get(places_url, params=params, timeout=7)
                 data = response.json()
@@ -107,7 +111,6 @@ class HyperLocalSwarmOrchestrator:
             except Exception:
                 pass
 
-        # Robust Fallback list for Patna corridor if API is empty
         if not raw_hubs:
             default_heavy_hubs = [
                 "TATA.CARS Service Centre - Guinea Motors, Patliputra Industrial Area, Patna, Bihar (Rating: 3.9)",
@@ -118,18 +121,11 @@ class HyperLocalSwarmOrchestrator:
             for hub in default_heavy_hubs:
                 raw_hubs.append({"display_str": hub, "coords": {}})
 
-        # Calculate or pick the closest hub based on proximity
-        # If coordinates are available via Distance Matrix API, we pick the absolute closest; else take the first valid local result
         closest_hub_str = raw_hubs[0]["display_str"]
-        
         if GOOGLE_MAPS_API_KEY and len(raw_hubs) > 1 and raw_hubs[0]["coords"]:
             destinations = "|".join([f"{h['coords'].get('lat')},{h['coords'].get('lng')}" for h in raw_hubs if h['coords']])
             matrix_url = "https://maps.googleapis.com/maps/api/distancematrix/json"
-            matrix_params = {
-                "origins": self.incident.location,
-                "destinations": destinations,
-                "key": GOOGLE_MAPS_API_KEY
-            }
+            matrix_params = {"origins": self.incident.location, "destinations": destinations, "key": GOOGLE_MAPS_API_KEY}
             try:
                 m_res = requests.get(matrix_url, params=matrix_params, timeout=5)
                 m_data = m_res.json()
@@ -147,10 +143,7 @@ class HyperLocalSwarmOrchestrator:
             except Exception:
                 pass
 
-        # Format numbered list (1 to N), ensuring the closest hub is placed at #1
         cleaned_raw_strings = [re.sub(r'^\d+\.\s*', '', h["display_str"]) for h in raw_hubs]
-        
-        # Bring closest hub to the top if present
         cleaned_closest = re.sub(r'^\d+\.\s*', '', closest_hub_str)
         if cleaned_closest in cleaned_raw_strings:
             cleaned_raw_strings.remove(cleaned_closest)
@@ -161,10 +154,8 @@ class HyperLocalSwarmOrchestrator:
 
         return {
             "corridor": self.incident.location,
-            "alt_route": f"Proximity-Optimized Heavy Corridor linking {self.incident.location} to {primary_hub.split('—')[0]}",
             "hub": primary_hub,
-            "all_detected_hubs": numbered_hubs,
-            "delay_saved": 4.0
+            "all_detected_hubs": numbered_hubs
         }
 
     def run_swarm(self) -> TriageResponse:
@@ -172,17 +163,21 @@ class HyperLocalSwarmOrchestrator:
         service_intel = self._get_heavy_service_center_intelligence()
         detected_hubs = service_intel.get("all_detected_hubs", [])
 
+        # Normalize vehicle ID key search
+        clean_vid = self.incident.vehicle_id.strip().upper()
+        assigned_phone = FLEET_WHATSAPP_MAPPING.get(clean_vid, "+919835011111") # Default fallback
+
         # 1. Supervisor Agent
         self.step_counter += 1
         t_start = time.time()
         sup_dec = {
             "action_required": True,
             "target_vehicle": self.incident.vehicle_id,
+            "mapped_whatsapp_number": assigned_phone,
             "breakdown_location": map_route["start_address"] if map_route else self.incident.location,
             "destination_workshop": service_intel["hub"],
             "all_nearby_service_centers": detected_hubs,
             "issue_detected": self.incident.issue_type,
-            "assigned_sub_agents": ["RoutingAgent", "ProcurementAgent", "LegalAgent", "ERPSyncAgent"],
             "risk_score": 0.94 if self.incident.severity == "CRITICAL" else 0.70
         }
         self.traces.append(AgentTrace(step_name="Supervisor_Triage", agent_role="Supervisor Agent", status="SUCCESS", timestamp=round((time.time() - t_start) * 1000, 2), output_payload=sup_dec))
@@ -191,13 +186,10 @@ class HyperLocalSwarmOrchestrator:
         self.step_counter += 1
         t_start = time.time()
         routing = {
-            "routing_engine": "Google Maps Directions API" if map_route else "Bihar Heavy Corridor Fallback",
             "total_distance": map_route["distance_text"] if map_route else "310 km",
             "estimated_travel_time": map_route["duration_text"] if map_route else "6 hours",
-            "primary_route_status": "HEAVY_TRAFFIC_OR_CONGESTED",
-            "hyper_accurate_alternative_route": f"Optimized proximity transit from {self.incident.location} to nearest verified workshop: {service_intel['hub'].split('—')[0]}",
-            "start_coordinates": map_route["start_coords"] if map_route else {"lat": 25.6, "lng": 85.1},
-            "end_coordinates": map_route["end_coords"] if map_route else {"lat": 25.5, "lng": 87.5}
+            "primary_route_status": "HEAVY_CORRIDOR_OPTIMIZED",
+            "hyper_accurate_alternative_route": f"Optimized transit from {self.incident.location} to {service_intel['hub'].split('—')[0]}"
         }
         self.traces.append(AgentTrace(step_name="Routing_Recalculation", agent_role="Routing Agent", status="SUCCESS", timestamp=round((time.time() - t_start) * 1000, 2), output_payload=routing))
 
@@ -205,50 +197,35 @@ class HyperLocalSwarmOrchestrator:
         self.step_counter += 1
         t_start = time.time()
         proc = {
-            "cargo_type": self.incident.cargo_type,
             "nearest_operational_hub": service_intel["hub"],
             "all_nearby_service_centers": detected_hubs,
-            "inventory_status": f"100% genuine Tata/Eicher replacement spares & mobile mechanic crew locked for {self.incident.vehicle_id}",
-            "dispatch_status": "READY_FOR_IMMEDIATE_DISPATCH_TO_DESTINATION"
+            "inventory_status": f"Spares locked for {self.incident.vehicle_id}"
         }
         self.traces.append(AgentTrace(step_name="Procurement_Vendor_Negotiation", agent_role="Procurement Agent", status="SUCCESS", timestamp=round((time.time() - t_start) * 1000, 2), output_payload=proc))
 
-        # 4. Legal Agent
-        self.step_counter += 1
-        t_start = time.time()
-        legal = {
-            "notice_generated": True,
-            "incident_zone": map_route["start_address"] if map_route else service_intel["corridor"],
-            "destination_zone": service_intel["hub"],
-            "document_type": "Emergency Transit Towing Permit & Force Majeure Notice",
-            "penalty_clause_invoked": "Commercial Logistics SLA Section 14.2"
-        }
-        self.traces.append(AgentTrace(step_name="Legal_Compliance_Generation", agent_role="Legal Agent", status="SUCCESS", timestamp=round((time.time() - t_start) * 1000, 2), output_payload=legal))
-
-        # 5. ERP Sync Agent
+        # 4. ERP Sync Agent
         self.step_counter += 1
         t_start = time.time()
         erp = {
             "erp_transaction_id": f"TXN-ERP-{uuid.uuid4().hex[:6].upper()}",
-            "vehicle_logged": self.incident.vehicle_id,
-            "total_trip_distance_meters": map_route["distance_value"] if map_route else 300000,
-            "ledger_status": "COMMITTED",
-            "fleet_status_updated": "REROUTED_VIA_DYNAMIC_MAPPED_PATH"
+            "ledger_status": "COMMITTED"
         }
         self.traces.append(AgentTrace(step_name="ERP_State_Commit", agent_role="ERP Sync Agent", status="SUCCESS", timestamp=round((time.time() - t_start) * 1000, 2), output_payload=erp))
 
         return TriageResponse(
             incident_id=self.incident_id,
-            status="RESOLVED_VIA_TATA_EICHER_SWARM",
+            status="RESOLVED_VIA_SWARM",
             execution_time_ms=round((time.time() - self.start_time) * 1000, 2),
             deterministic_steps_executed=self.step_counter,
+            assigned_whatsapp_number=assigned_phone,
             traces=self.traces,
             final_resolution={
                 "vehicle_id": self.incident.vehicle_id,
+                "assigned_whatsapp": assigned_phone,
                 "origin": self.incident.location,
-                "destination": service_intel["hub"],
+                "primary_nearest_hub": service_intel["hub"],
                 "all_available_service_centers": detected_hubs,
-                "mitigation_summary": f"Swarm rerouted heavy unit {self.incident.vehicle_id} from {self.incident.location} to the closest repair workshop: {service_intel['hub']}.",
+                "mitigation_summary": f"Swarm rerouted heavy unit {self.incident.vehicle_id} to closest repair hub: {service_intel['hub']}.",
                 "erp_ref": erp["erp_transaction_id"]
             }
         )
@@ -259,4 +236,4 @@ async def trigger_triage(incident: IncidentInput):
 
 @app.get("/api/health")
 async def health_check():
-    return {"status": "online", "engine": "Fleet Swarm Intelligence Proximity Engine v3.6.2"}
+    return {"status": "online"}
