@@ -112,14 +112,16 @@ def call_ai_agent(manager_text: str, incident_ctx: dict) -> dict:
         f"Manager's WhatsApp Message: \"{manager_text}\""
     )
 
-    try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+        try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key={GEMINI_API_KEY}"
         payload = {
+            "systemInstruction": {
+                "parts": [{"text": system_prompt}]
+            },
             "contents": [
                 {
-                    "parts": [
-                        {"text": system_prompt + "\n\n" + user_prompt}
-                    ]
+                    "role": "user",
+                    "parts": [{"text": user_prompt}]
                 }
             ],
             "generationConfig": {
@@ -130,13 +132,11 @@ def call_ai_agent(manager_text: str, incident_ctx: dict) -> dict:
         res = requests.post(url, json=payload, timeout=15)
         res.raise_for_status()
         data = res.json()
-        
-        # Extract text safely from Gemini response
+
         content = data["candidates"][0]["content"]["parts"][0]["text"]
-        # Clean potential markdown formatting if Gemini adds it
         cleaned_content = content.replace("```json", "").replace("```", "").strip()
         parsed = json.loads(cleaned_content)
-        
+
         if parsed.get("decision") and parsed.get("reply_text"):
             return parsed
         return _keyword_fallback(manager_text)
