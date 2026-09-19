@@ -18,9 +18,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
+MANAGER_WHATSAPP_NUMBER = "+916209313108"
 # Fleet Unit ID to WhatsApp Number mapping
-FLEET_WHATSAPP_MAPPING = {
+DRIVER_WHATSAPP_MAPPING = {
     "BR01GP9621": "+917858847385",
     "BR01GM7465": "+916209313108",
     "BR01GP0756": "+916209313108",
@@ -355,7 +355,7 @@ class EnterpriseAgenticRAGOrchestrator:
         detected_hubs = service_intel.get("all_detected_hubs", [])
 
         clean_vid = self.incident.vehicle_id.strip().upper()
-        assigned_phone = FLEET_WHATSAPP_MAPPING.get(clean_vid, "+916209313108")
+        assigned_phone = MANAGER_WHATSAPP_NUMBER
 
         APPROVAL_STATES[self.incident_id] = "PENDING_MANAGER_APPROVAL"
         INCIDENT_CONTEXTS[assigned_phone] = self.incident_id
@@ -551,7 +551,7 @@ async def whatsapp_webhook(request: Request):
                     hub = incident_ctx.get("hub")
                     recommended_part = incident_ctx.get("recommended_part")
                     
-                    driver_phone = FLEET_WHATSAPP_MAPPING.get(vehicle_id)
+                    driver_phone = DRIVER_WHATSAPP_MAPPING.get(vehicle_id)
                     if driver_phone:
                         # Driver ko active context mein register karo taaki woh AI agent se baat kar sake
                         cleaned_driver_10 = ''.join(filter(str.isdigit, driver_phone))[-10:]
