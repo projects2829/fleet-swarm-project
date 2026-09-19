@@ -51,11 +51,14 @@ function App() {
   const routingTrace = responseResult?.traces?.find(t => t.step_name === 'Routing_Recalculation')?.output_payload;
   const procurementTrace = responseResult?.traces?.find(t => t.step_name === 'Procurement_Vendor_Negotiation')?.output_payload;
 
-  // Hub name extraction for Google Maps Waypoints
+  // Exact Hub name extraction
   const nearestHub = procurementTrace?.nearest_operational_hub || 'Zero Mile Central Storage Depot, Patna';
 
-  // Enhanced Google Maps Multi-Stop Directions URL (Origin -> Hub -> Destination)
-  const googleMapsUrl = `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(formData.location)}&destination=${encodeURIComponent(formData.destination)}&waypoints=${encodeURIComponent(nearestHub)}&travelmode=driving`;
+  // 1. Directions URL with Hub as Waypoint
+  const googleMapsRouteUrl = `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(formData.location)}&destination=${encodeURIComponent(formData.destination)}&waypoints=${encodeURIComponent(nearestHub)}&travelmode=driving`;
+
+  // 2. Direct Pinpoint Search URL for the Nearest Operational Hub
+  const googleMapsHubPinUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(nearestHub)}`;
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 p-4 md:p-8 font-sans">
@@ -123,18 +126,18 @@ function App() {
           </div>
         )}
 
-        {/* Execution Results & Live Google Maps Integration */}
+        {/* Execution Results & Dual Map Integration */}
         {responseResult && (
           <div className="space-y-6">
             
-            {/* Interactive Route & Nearest Operational Hub Card */}
+            {/* Interactive Route & Hub Pin Card */}
             <div className="bg-gradient-to-br from-slate-900 to-slate-950 border border-blue-500/30 rounded-xl p-6 shadow-2xl relative overflow-hidden">
               <div className="absolute top-0 right-0 bg-blue-600 text-white text-[10px] font-bold px-3 py-1 rounded-bl-xl uppercase tracking-wider">
-                Live Google Maps Multi-Stop Route
+                Live Google Maps Hub & Route Integration
               </div>
 
               <h3 className="text-lg font-bold text-white mb-3 flex items-center gap-2">
-                <span>📍</span> Route, Waypoints & Hub Navigation
+                <span>📍</span> Route, Waypoints & Operational Hub Pinpoint
               </h3>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-5">
@@ -146,12 +149,23 @@ function App() {
                   <p className="text-xs text-slate-400 mt-2">Status: <span className="text-amber-400 font-medium">{routingTrace?.primary_route_status || 'Optimized'}</span></p>
                 </div>
 
-                <div className="bg-slate-950/80 p-4 rounded-lg border border-slate-800">
-                  <span className="text-xs text-slate-400 block uppercase tracking-wider mb-1">Nearest Operational Hub (Waypoint)</span>
-                  <div className="text-sm font-bold text-emerald-400">
-                    {nearestHub}
+                <div className="bg-slate-950/80 p-4 rounded-lg border border-slate-800 flex flex-col justify-between">
+                  <div>
+                    <span className="text-xs text-slate-400 block uppercase tracking-wider mb-1">Nearest Operational Hub (Direct Pin)</span>
+                    <div className="text-sm font-bold text-emerald-400">
+                      {nearestHub}
+                    </div>
+                    <p className="text-xs text-slate-300 mt-1">{procurementTrace?.inventory_status || 'Stock locked 100%'}</p>
                   </div>
-                  <p className="text-xs text-slate-300 mt-1">{procurementTrace?.inventory_status || 'Stock locked 100%'}</p>
+                  {/* Quick Hub Pin Button */}
+                  <a 
+                    href={googleMapsHubPinUrl}
+                    target="_blank" 
+                    rel="noopener noreferrer" 
+                    className="mt-3 text-center bg-slate-900 hover:bg-slate-800 text-emerald-400 border border-emerald-500/40 text-xs font-semibold py-1.5 px-3 rounded transition flex items-center justify-center gap-1.5"
+                  >
+                    <span>🎯</span> Pinpoint Hub on Google Maps
+                  </a>
                 </div>
               </div>
 
@@ -162,12 +176,12 @@ function App() {
 
               {/* Direct Multi-Stop Open in Google Maps Button */}
               <a 
-                href={googleMapsUrl} 
+                href={googleMapsRouteUrl} 
                 target="_blank" 
                 rel="noopener noreferrer" 
                 className="block text-center w-full bg-emerald-600 hover:bg-emerald-500 text-white font-semibold py-3 px-4 rounded-lg transition shadow-lg shadow-emerald-600/20 text-sm flex items-center justify-center gap-2"
               >
-                <span>🗺️</span> Open Route with Hub Waypoint in Google Maps
+                <span>🗺️</span> Open Full Route with Hub Waypoint in Google Maps
               </a>
             </div>
 
