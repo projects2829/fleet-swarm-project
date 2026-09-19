@@ -8,7 +8,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-app = FastAPI(title="Hyper-Local Fleet Swarm Intelligence Engine", version="3.8.2")
+app = FastAPI(title="Hyper-Local Fleet Swarm Intelligence Engine", version="3.8.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -27,13 +27,12 @@ FLEET_WHATSAPP_MAPPING = {
     "BR01GP8148": "+916209313108"
 }
 
-# In-memory storage to track approval states for WhatsApp webhook sync
+# In-memory storage to track approval states for HITL simulation
 APPROVAL_STATES = {}
 
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 WHATSAPP_PHONE_ID = os.getenv("PHONE_NUMBER_ID", "1340284595815318")
 
-# Meta Webhook Verify Token
 VERIFY_TOKEN = "fleet_secret_token_2026"
 
 class IncidentInput(BaseModel):
@@ -178,7 +177,6 @@ class HyperLocalSwarmOrchestrator:
 
         APPROVAL_STATES[self.incident_id] = "PENDING_MANAGER_APPROVAL"
 
-        # 1. Supervisor Agent
         self.step_counter += 1
         t_start = time.time()
         sup_dec = {
@@ -193,7 +191,6 @@ class HyperLocalSwarmOrchestrator:
         }
         self.traces.append(AgentTrace(step_name="Supervisor_Triage", agent_role="Supervisor Agent", status="SUCCESS", timestamp=round((time.time() - t_start) * 1000, 2), output_payload=sup_dec))
 
-        # 2. Routing Agent
         self.step_counter += 1
         t_start = time.time()
         routing = {
@@ -204,7 +201,6 @@ class HyperLocalSwarmOrchestrator:
         }
         self.traces.append(AgentTrace(step_name="Routing_Recalculation", agent_role="Routing Agent", status="SUCCESS", timestamp=round((time.time() - t_start) * 1000, 2), output_payload=routing))
 
-        # 3. ERP Sync Agent
         self.step_counter += 1
         t_start = time.time()
         erp = {
@@ -236,7 +232,6 @@ class HyperLocalSwarmOrchestrator:
 async def trigger_triage(incident: IncidentInput):
     return HyperLocalSwarmOrchestrator(incident).run_swarm()
 
-# 🔍 NEW: Live Approval Status Polling Endpoint for Frontend
 @app.get("/api/approval-status/{incident_id}")
 async def get_approval_status(incident_id: str):
     current_status = APPROVAL_STATES.get(incident_id, "PENDING_MANAGER_APPROVAL")
@@ -245,7 +240,6 @@ async def get_approval_status(incident_id: str):
         "approval_status": current_status
     }
 
-# Endpoint to trigger WhatsApp Interactive Buttons via Meta Cloud API
 @app.post("/api/send-whatsapp-interactive")
 async def send_whatsapp_interactive(payload: dict):
     incident_id = payload.get("incident_id")
@@ -309,9 +303,6 @@ async def send_whatsapp_interactive(payload: dict):
         "message": f"WhatsApp interactive buttons sent successfully to {cleaned_phone} for incident {incident_id}."
     }
 
-# ==========================================
-# WHATSAPP WEBHOOK VERIFICATION (GET)
-# ==========================================
 @app.get("/api/whatsapp-webhook")
 async def verify_whatsapp_webhook(request: Request):
     hub_mode = request.query_params.get("hub.mode")
@@ -323,9 +314,6 @@ async def verify_whatsapp_webhook(request: Request):
     
     raise HTTPException(status_code=403, detail="Verification token mismatch")
 
-# ==========================================
-# INCOMING BUTTON CLICK HANDLER (POST)
-# ==========================================
 @app.post("/api/whatsapp-webhook")
 async def whatsapp_webhook(request: Request):
     try:
@@ -356,4 +344,4 @@ async def whatsapp_webhook(request: Request):
 
 @app.get("/api/health")
 async def health_check():
-    return {"status": "online", "engine": "HITL Swarm Orchestrator v3.8.2"}
+    return {"status": "online", "engine": "HITL Swarm Orchestrator v3.8.1"}
