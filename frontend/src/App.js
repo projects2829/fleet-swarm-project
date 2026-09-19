@@ -230,7 +230,8 @@ function App() {
             </div>
 
             {/* Pipeline Traces */}
-            <div className="space-y-4">
+
+       /*     <div className="space-y-4">
               <h3 className="text-md font-semibold text-slate-300">Multi-Agent Pipeline Execution Traces</h3>
               
               <div className="grid grid-cols-1 gap-4">
@@ -259,7 +260,7 @@ function App() {
                       ))}
                     </div>
                   </div>
-                ))}
+                ))}*/
               </div>
             </div>
 
