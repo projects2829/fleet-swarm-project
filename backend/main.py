@@ -89,17 +89,22 @@ def call_ai_agent(manager_text: str, incident_ctx: dict) -> dict:
     if not GEMINI_API_KEY:
         return _keyword_fallback(manager_text)
 
-    system_prompt = (
+        system_prompt = (
         "You are an advanced Autonomous Enterprise Fleet Operations AI Agent for Beekay Infra & Logistics. "
-        "A manager has sent a text reply on WhatsApp regarding a heavy commercial vehicle breakdown incident. "
-        "Your job is to analyze their instructions, classify their decision into one of these exact states: "
-        "1. APPROVED_AND_DISPATCHED\n"
-        "2. APPROVED_LOCAL_MECHANIC_REROUTED\n"
-        "3. REJECTED_REROUTING\n"
-        "4. CUSTOM_INSTRUCTION_LOGGED (if they gave specific instructions like alternative workshop, parts change, or driver guidelines).\n\n"
-        "Then, write a smart, professional, polite WhatsApp reply (1-2 sentences) strictly in English, "
-        "acknowledging their exact instruction and confirming the operational next steps.\n\n"
-        "Respond ONLY as valid JSON in this exact format without any markdown code blocks: "
+        "A manager has sent a WhatsApp message about a vehicle breakdown incident. "
+        "First, understand what the manager is ACTUALLY asking or instructing — do not give a generic "
+        "'approved and dispatched' reply unless they are actually approving something. "
+        "If they ask for a phone number, contact, or showroom number — give the exact hub_phone value "
+        "provided in the context, do NOT say you'll 'share it shortly' if the number is already given to you. "
+        "If they ask a factual question, answer it directly and specifically using the context given. "
+        "If they give an approval/rejection/reroute instruction, classify it accordingly. "
+        "Classify their decision into exactly one of: APPROVED_AND_DISPATCHED, APPROVED_LOCAL_MECHANIC_REROUTED, "
+        "REJECTED_REROUTING, INFO_REQUEST_ANSWERED (for questions/requests for info like phone numbers), "
+        "or CUSTOM_INSTRUCTION_LOGGED (for anything else specific).\n\n"
+        "Write a short (1-2 sentence), specific, professional WhatsApp reply that directly addresses what "
+        "they asked or said — using the real details from the context (hub name, phone number, part name) "
+        "wherever relevant.\n\n"
+        "Respond ONLY as valid JSON in this exact format without markdown code blocks: "
         "{\"decision\": \"...\", \"reply_text\": \"...\"}"
     )
 
@@ -108,6 +113,7 @@ def call_ai_agent(manager_text: str, incident_ctx: dict) -> dict:
         f"- Vehicle ID: {incident_ctx.get('vehicle_id')}\n"
         f"- Issue Type: {incident_ctx.get('issue_type')}\n"
         f"- Assigned Hub: {incident_ctx.get('hub')}\n"
+        f"- Hub Phone Number: {incident_ctx.get('hub_phone')}\n"
         f"- RAG Suggested Part: {incident_ctx.get('recommended_part')}\n\n"
         f"Manager's WhatsApp Message: \"{manager_text}\""
     )
@@ -228,7 +234,7 @@ class EnterpriseAgenticRAGOrchestrator:
             pass
         return None
 
-    def _get_heavy_service_center_intelligence(self):
+       def _get_heavy_service_center_intelligence(self):
         raw_hubs = []
         if GOOGLE_MAPS_API_KEY:
             places_url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
@@ -246,22 +252,24 @@ class EnterpriseAgenticRAGOrchestrator:
                         geometry = place.get('geometry', {}).get('location', {})
                         raw_hubs.append({
                             "display_str": f"{name} — {address} (Rating: {rating})",
-                            "coords": geometry
+                            "coords": geometry,
+                            "place_id": place.get("place_id")
                         })
             except Exception:
                 pass
 
         if not raw_hubs:
             default_heavy_hubs = [
-                "TATA.CARS Service Centre - Guinea Motors, Patliputra Industrial Area, Patna, Bihar (Rating: 3.9)",
-                "Eicher Commercial Vehicles Workshop, NH-30 Bypass Road, Patna, Bihar (Rating: 4.2)",
-                "Tata Motors Authorized Commercial Heavy Workshop, Zero Mile, Patna, Bihar (Rating: 4.1)",
-                "Eicher Trucks & Buses Service Station, Fatuha Industrial Area, Patna, Bihar (Rating: 4.0)"
+                {"display_str": "TATA.CARS Service Centre - Guinea Motors, Patliputra Industrial Area, Patna, Bihar (Rating: 3.9)", "place_id": None, "phone": "0612-2262244"},
+                {"display_str": "Eicher Commercial Vehicles Workshop, NH-30 Bypass Road, Patna, Bihar (Rating: 4.2)", "place_id": None, "phone": "0612-2277311"},
+                {"display_str": "Tata Motors Authorized Commercial Heavy Workshop, Zero Mile, Patna, Bihar (Rating: 4.1)", "place_id": None, "phone": "0612-2233890"},
+                {"display_str": "Eicher Trucks & Buses Service Station, Fatuha Industrial Area, Patna, Bihar (Rating: 4.0)", "place_id": None, "phone": "0612-2299456"}
             ]
             for hub in default_heavy_hubs:
-                raw_hubs.append({"display_str": hub, "coords": {}})
+                raw_hubs.append({"display_str": hub["display_str"], "coords": {}, "place_id": None, "phone": hub["phone"]})
 
         closest_hub_str = raw_hubs[0]["display_str"]
+        closest_hub_place_id = raw_hubs[0].get("place_id")
         if GOOGLE_MAPS_API_KEY and len(raw_hubs) > 1 and raw_hubs[0]["coords"]:
             destinations = "|".join([f"{h['coords'].get('lat')},{h['coords'].get('lng')}" for h in raw_hubs if h['coords']])
             matrix_url = "https://maps.googleapis.com/maps/api/distancematrix/json"
@@ -280,8 +288,32 @@ class EnterpriseAgenticRAGOrchestrator:
                                 min_distance = dist_val
                                 best_idx = idx
                     closest_hub_str = raw_hubs[best_idx]["display_str"]
+                    closest_hub_place_id = raw_hubs[best_idx].get("place_id")
             except Exception:
                 pass
+
+        # Fetch real phone number for the chosen hub
+        hub_phone = "Contact number not available — team will call and share shortly"
+        for h in raw_hubs:
+            if h["display_str"] == closest_hub_str:
+                if h.get("phone"):
+                    hub_phone = h["phone"]
+                elif h.get("place_id") and GOOGLE_MAPS_API_KEY:
+                    try:
+                        details_url = "https://maps.googleapis.com/maps/api/place/details/json"
+                        details_params = {
+                            "place_id": h["place_id"],
+                            "fields": "formatted_phone_number,international_phone_number",
+                            "key": GOOGLE_MAPS_API_KEY
+                        }
+                        d_res = requests.get(details_url, params=details_params, timeout=5)
+                        d_data = d_res.json()
+                        phone = d_data.get("result", {}).get("formatted_phone_number") or d_data.get("result", {}).get("international_phone_number")
+                        if phone:
+                            hub_phone = phone
+                    except Exception:
+                        pass
+                break
 
         cleaned_raw_strings = [re.sub(r'^\d+\.\s*', '', h["display_str"]) for h in raw_hubs]
         cleaned_closest = re.sub(r'^\d+\.\s*', '', closest_hub_str)
@@ -295,6 +327,7 @@ class EnterpriseAgenticRAGOrchestrator:
         return {
             "corridor": self.incident.location,
             "hub": primary_hub,
+            "hub_phone": hub_phone,
             "all_detected_hubs": numbered_hubs
         }
 
@@ -309,10 +342,11 @@ class EnterpriseAgenticRAGOrchestrator:
 
         APPROVAL_STATES[self.incident_id] = "PENDING_MANAGER_APPROVAL"
         INCIDENT_CONTEXTS[assigned_phone] = self.incident_id
-        INCIDENT_DETAILS[self.incident_id] = {
+                INCIDENT_DETAILS[self.incident_id] = {
             "vehicle_id": self.incident.vehicle_id,
             "issue_type": self.incident.issue_type,
             "hub": service_intel["hub"],
+            "hub_phone": service_intel["hub_phone"],
             "recommended_part": rag_intel["recommended_part"]
         }
 
