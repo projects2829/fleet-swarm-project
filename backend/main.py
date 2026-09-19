@@ -31,7 +31,7 @@ FLEET_WHATSAPP_MAPPING = {
 APPROVAL_STATES = {}
 
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
-WHATSAPP_PHONE_ID = os.getenv("WHATSAPP_PHONE_ID", "YOUR_PHONE_NUMBER_ID")
+WHATSAPP_PHONE_ID = os.getenv("PHONE_NUMBER_ID", "1340284595815318")
 
 # 🔑 Yeh wahi secret token hai jo aap Meta Dashboard ke 'Verify Token' mein dalenge
 VERIFY_TOKEN = "fleet_secret_token_2026"
@@ -240,19 +240,25 @@ async def trigger_triage(incident: IncidentInput):
 @app.post("/api/send-whatsapp-interactive")
 async def send_whatsapp_interactive(payload: dict):
     incident_id = payload.get("incident_id")
-    phone = payload.get("phone")
+    raw_phone = payload.get("phone", "")
     vehicle_id = payload.get("vehicle_id")
     hub = payload.get("hub")
 
-    if WHATSAPP_TOKEN and WHATSAPP_TOKEN != "YOUR_TOKEN":
-        url = f"https://graph.facebook.com/v17.0/{WHATSAPP_PHONE_ID}/messages"
+    # Clean phone number (removes '+' and spaces, keeping digits only)
+    cleaned_phone = re.sub(r'\D', '', raw_phone)
+
+    token = os.getenv("WHATSAPP_TOKEN")
+    phone_id = os.getenv("PHONE_NUMBER_ID", "1340284595815318")
+
+    if token and token != "YOUR_TOKEN":
+        url = f"https://graph.facebook.com/v26.0/{phone_id}/messages"
         headers = {
-            "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+            "Authorization": f"Bearer {token}",
             "Content-Type": "application/json"
         }
         body = {
             "messaging_product": "whatsapp",
-            "to": phone,
+            "to": cleaned_phone,
             "type": "interactive",
             "interactive": {
                 "type": "button",
@@ -268,15 +274,26 @@ async def send_whatsapp_interactive(payload: dict):
             }
         }
         res = requests.post(url, json=body, headers=headers)
+        print("Meta API Response Status:", res.status_code)
+        print("Meta API Response Body:", res.text)
+        
+        # 🔥 FIX: Expose real Meta API error instead of masking it as success
+        if res.status_code != 200:
+            return {
+                "status": "meta_api_error",
+                "status_code": res.status_code,
+                "error_details": res.json()
+            }
+        
         return {"status": "dispatched_via_meta_api", "response": res.json()}
     
     return {
         "status": "simulated_interactive_dispatched",
-        "message": f"WhatsApp interactive buttons sent successfully to {phone} for incident {incident_id}."
+        "message": f"WhatsApp interactive buttons sent successfully to {cleaned_phone} for incident {incident_id}."
     }
 
 # ==========================================
-# 1. WHATSAPP WEBHOOK VERIFICATION (GET) - Meta Dashboard Setup ke liye
+# 1. WHATSAPP WEBHOOK VERIFICATION (GET)
 # ==========================================
 @app.get("/api/whatsapp-webhook")
 async def verify_whatsapp_webhook(request: Request):
@@ -290,9 +307,8 @@ async def verify_whatsapp_webhook(request: Request):
     
     raise HTTPException(status_code=403, detail="Verification token mismatch")
 
-
 # ==========================================
-# 2. INCOMING BUTTON CLICK HANDLER (POST) - Webhook Listener
+# 2. INCOMING BUTTON CLICK HANDLER (POST)
 # ==========================================
 @app.post("/api/whatsapp-webhook")
 async def whatsapp_webhook(request: Request):
@@ -309,7 +325,7 @@ async def whatsapp_webhook(request: Request):
             msg = messages[0]
             if msg.get("type") == "interactive":
                 button_reply = msg["interactive"].get("button_reply", {})
-                payload_id = button_reply.get("id", "") # e.g. APPROVE_INC-12345
+                payload_id = button_reply.get("id", "")
                 
                 if "APPROVE_" in payload_id:
                     inc_id = payload_id.split("APPROVE_")[1]
