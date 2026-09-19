@@ -21,7 +21,7 @@ app.add_middleware(
 
 # Fleet Unit ID to WhatsApp Number mapping
 FLEET_WHATSAPP_MAPPING = {
-    "BR01GP9621": "+916209313108",
+    "BR01GP9621": "+917858847385",
     "BR01GM7465": "+916209313108",
     "BR01GP0756": "+916209313108",
     "BR01GP0757": "+916209313108",
@@ -32,6 +32,7 @@ FLEET_WHATSAPP_MAPPING = {
 APPROVAL_STATES = {}
 INCIDENT_CONTEXTS = {}   # phone -> incident_id
 INCIDENT_DETAILS = {}    # incident_id -> full context dict (for AI replies)
+ACTIVE_VEHICLE_BY_PHONE = {}
 
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 WHATSAPP_PHONE_ID = os.getenv("PHONE_NUMBER_ID", "1340284595815318")
@@ -515,7 +516,7 @@ async def whatsapp_webhook(request: Request):
             sender_10_digit = ''.join(filter(str.isdigit, raw_sender_phone))[-10:]
             print(f"DEBUG: Sender 10-digit extracted: {sender_10_digit}")
             
-            # Case A: Button Click Response (Approve / Reject buttons)
+            # Case A: Manager Button Click Response (Approve / Reject)
             if msg.get("type") == "interactive":
                 button_reply = msg["interactive"].get("button_reply", {})
                 payload_id = button_reply.get("id", "")
@@ -524,20 +525,46 @@ async def whatsapp_webhook(request: Request):
                 if "APPROVE_" in payload_id:
                     inc_id = payload_id.split("APPROVE_")[1]
                     APPROVAL_STATES[inc_id] = "APPROVED_AND_DISPATCHED"
-                    resp = send_whatsapp_text_reply(raw_sender_phone, "✅ Repair approved successfully — dispatch process has been initiated.")
-                    print("DEBUG REPLY SENT RESPONSE:", resp)
-                    return {"status": "success", "action": "Approved via button click."}
+                    
+                    # 1. Manager ko confirmation bhejo
+                    send_whatsapp_text_reply(raw_sender_phone, "✅ Repair approved successfully — dispatch & driver notification initiated.")
+                    
+                    # 2. Gaari ki ID se mapped driver ka number dhoondho aur use alert bhejo
+                    incident_ctx = INCIDENT_DETAILS.get(inc_id, {})
+                    vehicle_id = incident_ctx.get("vehicle_id")
+                    hub = incident_ctx.get("hub")
+                    recommended_part = incident_ctx.get("recommended_part")
+                    
+                    driver_phone = FLEET_WHATSAPP_MAPPING.get(vehicle_id)
+                    if driver_phone:
+                        # Driver ko active context mein register karo taaki woh AI se chat kar sake
+                        cleaned_driver_10 = ''.join(filter(str.isdigit, driver_phone))[-10:]
+                        INCIDENT_CONTEXTS[cleaned_driver_10] = inc_id
+                        ACTIVE_VEHICLE_BY_PHONE[cleaned_driver_10] = vehicle_id
+                        
+                        # Driver ko dispatch message bhejo
+                        driver_msg = (
+                            f"🚨 *FLEET DISPATCH ALERT (Vehicle: {vehicle_id})*\n\n"
+                            f"Your repair has been *APPROVED* by management.\n"
+                            f"🛠️ *Assigned Hub:* {hub}\n"
+                            f"⚙️ *Required Part:* {recommended_part}\n\n"
+                            f"You can now reply directly on this chat with any updates, questions, or issues for the AI Agent."
+                        )
+                        send_whatsapp_text_reply(driver_phone, driver_msg)
+                        print(f"DEBUG: Dispatched notification to driver at {driver_phone} for vehicle {vehicle_id}")
+
+                    return {"status": "success", "action": "Approved and driver notified."}
+
                 elif "REJECT_" in payload_id:
                     inc_id = payload_id.split("REJECT_")[1]
                     APPROVAL_STATES[inc_id] = "REJECTED_REROUTING"
-                    resp = send_whatsapp_text_reply(raw_sender_phone, "❌ Repair rejected — vehicle rerouting has been initiated.")
-                    print("DEBUG REPLY SENT RESPONSE:", resp)
+                    send_whatsapp_text_reply(raw_sender_phone, "❌ Repair rejected — vehicle rerouting has been initiated.")
                     return {"status": "success", "action": "Rejected via button click."}
             
-            # Case B: Free Text Message -> Handled 100% by Gemini AI Agent
+            # Case B: Free Text Message (Chahe Manager ho ya Mapped Driver) -> Handled by Gemini AI Agent
             elif msg.get("type") == "text":
                 text_body = msg["text"].get("body", "")
-                print(f"DEBUG: Text message received for AI: {text_body}")
+                print(f"DEBUG: Text message received for AI: {text_body} from {sender_10_digit}")
                 
                 matched_inc_id = None
                 for phone, inc_id in INCIDENT_CONTEXTS.items():
@@ -551,12 +578,15 @@ async def whatsapp_webhook(request: Request):
                 
                 if matched_inc_id:
                     incident_ctx = INCIDENT_DETAILS.get(matched_inc_id, {})
-                    # Call Gemini AI Agent to parse intent & draft professional reply
+                    # Add vehicle context if it's the driver
+                    if sender_10_digit in ACTIVE_VEHICLE_BY_PHONE:
+                        incident_ctx["current_chatter"] = f"Driver of {ACTIVE_VEHICLE_BY_PHONE[sender_10_digit]}"
+                    
+                    # Call Gemini AI Agent to generate smart contextual response
                     ai_result = call_ai_agent(text_body, incident_ctx)
-                    APPROVAL_STATES[matched_inc_id] = ai_result["decision"]
                     resp = send_whatsapp_text_reply(raw_sender_phone, ai_result["reply_text"])
-                    print("DEBUG AI AGENT SMART REPLY SENT:", resp)
-                    return {"status": "success", "action": "Smart AI agent replied.", "decision": ai_result["decision"]}
+                    print("DEBUG AI AGENT SMART REPLY SENT TO CHATTER:", resp)
+                    return {"status": "success", "action": "Smart AI agent replied to chatter.", "decision": ai_result["decision"]}
                 else:
                     send_whatsapp_text_reply(raw_sender_phone, "⚠️ No active fleet incident context found for your session.")
                     return {"status": "error", "action": "No active incident context found."}
