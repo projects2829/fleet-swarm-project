@@ -459,6 +459,8 @@ async def verify_whatsapp_webhook(request: Request):
 async def whatsapp_webhook(request: Request):
     try:
         data = await request.json()
+        print("DEBUG WEBHOOK RECEIVED:", json.dumps(data, indent=2))  # Yeh line terminal par print karegi
+        
         entry = data.get("entry", [{}])[0]
         changes = entry.get("changes", [{}])[0]
         value = changes.get("value", {})
@@ -472,28 +474,35 @@ async def whatsapp_webhook(request: Request):
             if msg.get("type") == "interactive":
                 button_reply = msg["interactive"].get("button_reply", {})
                 payload_id = button_reply.get("id", "")
+                print(f"DEBUG: Button clicked with ID: {payload_id}")
+                
                 if "APPROVE_" in payload_id:
                     inc_id = payload_id.split("APPROVE_")[1]
                     APPROVAL_STATES[inc_id] = "APPROVED_AND_DISPATCHED"
-                    send_whatsapp_text_reply(sender_phone, "✅ Repair approved successfully — dispatch process has been initiated.")
+                    resp = send_whatsapp_text_reply(sender_phone, "✅ Repair approved successfully — dispatch process has been initiated.")
+                    print("DEBUG REPLY SENT RESPONSE:", resp)
                     return {"status": "success", "action": "Approved via button click."}
                 elif "REJECT_" in payload_id:
                     inc_id = payload_id.split("REJECT_")[1]
                     APPROVAL_STATES[inc_id] = "REJECTED_REROUTING"
-                    send_whatsapp_text_reply(sender_phone, "❌ Repair rejected — vehicle rerouting has been initiated.")
+                    resp = send_whatsapp_text_reply(sender_phone, "❌ Repair rejected — vehicle rerouting has been initiated.")
+                    print("DEBUG REPLY SENT RESPONSE:", resp)
                     return {"status": "success", "action": "Rejected via button click."}
             
             # Case B: Conversational LLM / Gemini Natural Language Text Response
             elif msg.get("type") == "text":
                 text_body = msg["text"].get("body", "")
+                print(f"DEBUG: Text message received: {text_body}")
                 for phone, inc_id in INCIDENT_CONTEXTS.items():
                     if phone in sender_phone or sender_phone in phone:
                         incident_ctx = INCIDENT_DETAILS.get(inc_id, {})
                         ai_result = call_ai_agent(text_body, incident_ctx)
                         APPROVAL_STATES[inc_id] = ai_result["decision"]
-                        send_whatsapp_text_reply(sender_phone, ai_result["reply_text"])
+                        resp = send_whatsapp_text_reply(sender_phone, ai_result["reply_text"])
+                        print("DEBUG AI REPLY SENT:", resp)
                         return {"status": "success", "action": "AI agent replied.", "decision": ai_result["decision"]}
     except Exception as e:
+        print("DEBUG WEBHOOK ERROR:", str(e))
         return {"status": "error", "details": str(e)}
 
     return {"status": "received"}
