@@ -459,7 +459,7 @@ async def verify_whatsapp_webhook(request: Request):
 async def whatsapp_webhook(request: Request):
     try:
         data = await request.json()
-        print("DEBUG WEBHOOK RECEIVED:", json.dumps(data, indent=2))  # Yeh line terminal par print karegi
+        print("DEBUG WEBHOOK RECEIVED:", json.dumps(data, indent=2))
         
         entry = data.get("entry", [{}])[0]
         changes = entry.get("changes", [{}])[0]
@@ -468,7 +468,10 @@ async def whatsapp_webhook(request: Request):
 
         if messages:
             msg = messages[0]
-            sender_phone = msg.get("from", "")
+            raw_sender_phone = msg.get("from", "")
+            # Sirf last ke 10 digits nikal lo taaki country code (+91) ka koi issue na aaye
+            sender_10_digit = ''.join(filter(str.isdigit, raw_sender_phone))[-10:]
+            print(f"DEBUG: Sender 10-digit extracted: {sender_10_digit}")
             
             # Case A: Button Click Response
             if msg.get("type") == "interactive":
@@ -479,13 +482,13 @@ async def whatsapp_webhook(request: Request):
                 if "APPROVE_" in payload_id:
                     inc_id = payload_id.split("APPROVE_")[1]
                     APPROVAL_STATES[inc_id] = "APPROVED_AND_DISPATCHED"
-                    resp = send_whatsapp_text_reply(sender_phone, "✅ Repair approved successfully — dispatch process has been initiated.")
+                    resp = send_whatsapp_text_reply(raw_sender_phone, "✅ Repair approved successfully — dispatch process has been initiated.")
                     print("DEBUG REPLY SENT RESPONSE:", resp)
                     return {"status": "success", "action": "Approved via button click."}
                 elif "REJECT_" in payload_id:
                     inc_id = payload_id.split("REJECT_")[1]
                     APPROVAL_STATES[inc_id] = "REJECTED_REROUTING"
-                    resp = send_whatsapp_text_reply(sender_phone, "❌ Repair rejected — vehicle rerouting has been initiated.")
+                    resp = send_whatsapp_text_reply(raw_sender_phone, "❌ Repair rejected — vehicle rerouting has been initiated.")
                     print("DEBUG REPLY SENT RESPONSE:", resp)
                     return {"status": "success", "action": "Rejected via button click."}
             
@@ -493,14 +496,30 @@ async def whatsapp_webhook(request: Request):
             elif msg.get("type") == "text":
                 text_body = msg["text"].get("body", "")
                 print(f"DEBUG: Text message received: {text_body}")
+                
+                matched_inc_id = None
                 for phone, inc_id in INCIDENT_CONTEXTS.items():
-                    if phone in sender_phone or sender_phone in phone:
-                        incident_ctx = INCIDENT_DETAILS.get(inc_id, {})
-                        ai_result = call_ai_agent(text_body, incident_ctx)
-                        APPROVAL_STATES[inc_id] = ai_result["decision"]
-                        resp = send_whatsapp_text_reply(sender_phone, ai_result["reply_text"])
-                        print("DEBUG AI REPLY SENT:", resp)
-                        return {"status": "success", "action": "AI agent replied.", "decision": ai_result["decision"]}
+                    reg_10_digit = ''.join(filter(str.isdigit, phone))[-10:]
+                    if reg_10_digit == sender_10_digit:
+                        matched_inc_id = inc_id
+                        break
+                
+                # Agar direct match na mile, toh jo sabse aakhri incident active tha use utha lo
+                if not matched_inc_id and INCIDENT_CONTEXTS:
+                    matched_inc_id = list(INCIDENT_CONTEXTS.values())[-1]
+                
+                if matched_inc_id:
+                    incident_ctx = INCIDENT_DETAILS.get(matched_inc_id, {})
+                    ai_result = call_ai_agent(text_body, incident_ctx)
+                    APPROVAL_STATES[matched_inc_id] = ai_result["decision"]
+                    resp = send_whatsapp_text_reply(raw_sender_phone, ai_result["reply_text"])
+                    print("DEBUG AI REPLY SENT:", resp)
+                    return {"status": "success", "action": "AI agent replied.", "decision": ai_result["decision"]}
+                else:
+                    # Agar koi incident context hi nahi mila
+                    send_whatsapp_text_reply(raw_sender_phone, "⚠️ No active fleet incident found for your session.")
+                    return {"status": "error", "action": "No active incident context found."}
+                    
     except Exception as e:
         print("DEBUG WEBHOOK ERROR:", str(e))
         return {"status": "error", "details": str(e)}
