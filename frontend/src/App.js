@@ -50,9 +50,10 @@ function App() {
     }
   };
 
-  // Live Polling Effect for Webhook Updates
+  // 🔄 Live Polling Effect: Track WhatsApp Webhook response automatically every 3 seconds
   useEffect(() => {
     if (!responseResult?.incident_id) return;
+
     const API_URL = process.env.REACT_APP_API_URL || 'https://fleet-swarm-backend.onrender.com';
     const incidentId = responseResult.incident_id;
 
@@ -60,9 +61,12 @@ function App() {
       try {
         const res = await fetch(`${API_URL}/api/approval-status/${incidentId}`);
         const data = await res.json();
+
         if (data && data.approval_status) {
           setApprovalStatus(data.approval_status);
-          if (data.approval_status.includes('APPROVED') || data.approval_status.includes('REJECTED')) {
+
+          // Stop polling once manager takes action
+          if (data.approval_status === 'APPROVED_AND_DISPATCHED' || data.approval_status === 'REJECTED_REROUTING') {
             clearInterval(interval);
           }
         }
@@ -75,15 +79,16 @@ function App() {
   }, [responseResult?.incident_id]);
 
   const routingTrace = responseResult?.traces?.find(t => t.step_name === 'Routing_Recalculation')?.output_payload;
-  const ragTrace = responseResult?.traces?.find(t => t.step_name === 'Agentic_RAG_Diagnostics')?.output_payload;
+  const procurementTrace = responseResult?.traces?.find(t => t.step_name === 'Procurement_Vendor_Negotiation')?.output_payload;
   const supervisorTrace = responseResult?.traces?.find(t => t.step_name === 'Supervisor_Triage')?.output_payload;
 
-  const nearestHub = supervisorTrace?.destination_workshop || 'Authorized Service Hub';
-  const allNearbyHubs = supervisorTrace?.all_nearby_service_centers || [];
+  const nearestHub = procurementTrace?.nearest_operational_hub || supervisorTrace?.destination_workshop || 'Authorized Service Hub';
+  const allNearbyHubs = supervisorTrace?.all_nearby_service_centers || responseResult?.final_resolution?.all_available_service_centers || [];
 
   const googleMapsRouteUrl = `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(formData.location)}&destination=${encodeURIComponent(formData.destination)}&waypoints=${encodeURIComponent(nearestHub)}&travelmode=driving`;
   const googleMapsHubPinUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(nearestHub)}`;
 
+  // Trigger WhatsApp Interactive Buttons Dispatch
   const handleTriggerInteractiveApproval = async () => {
     if (!responseResult) return;
     const API_URL = process.env.REACT_APP_API_URL || 'https://fleet-swarm-backend.onrender.com';
@@ -96,22 +101,17 @@ function App() {
           incident_id: responseResult.incident_id,
           phone: responseResult.assigned_whatsapp_number,
           vehicle_id: formData.vehicle_id,
-          hub: nearestHub,
-          location: formData.location,
-          issue_type: formData.issue_type,
-          severity: formData.severity,
-          cargo_type: formData.cargo_type,
-          recommended_part: ragTrace?.recommended_part || 'Heavy Duty Spare Kit'
+          hub: nearestHub
         })
       });
       const data = await res.json();
       if (data.status === 'meta_api_error') {
-        alert(`Meta API Error: ${JSON.stringify(data.error_details)}`);
+        alert(`Meta API Error (${data.status_code}): ${JSON.stringify(data.error_details)}`);
       } else {
-        alert(`Agentic RAG WhatsApp alert successfully dispatched to manager!`);
+        alert(`HITL Status: ${data.status}\nInteractive Approval Buttons sent to WhatsApp number: ${responseResult.assigned_whatsapp_number}`);
       }
     } catch (err) {
-      alert('Failed to dispatch Agentic WhatsApp message.');
+      alert('Failed to trigger interactive WhatsApp message.');
     }
   };
 
@@ -119,25 +119,26 @@ function App() {
     <div className="min-h-screen bg-slate-950 text-slate-100 p-4 md:p-8 font-sans">
       <div className="max-w-5xl mx-auto space-y-8">
         
+        {/* Header */}
         <header className="border-b border-slate-800 pb-5 text-center">
-          <div className="inline-block bg-purple-500/10 text-purple-400 text-xs font-semibold px-3 py-1 rounded-full mb-2 border border-purple-500/20">
-            ● Enterprise Agentic AI & RAG Swarm v4.0
+          <div className="inline-block bg-blue-500/10 text-blue-400 text-xs font-semibold px-3 py-1 rounded-full mb-2 border border-blue-500/20">
+            ● Swarm Cluster: HITL Active
           </div>
-          <h1 className="text-3xl font-extrabold tracking-tight text-white">Autonomous Fleet Intelligence Engine</h1>
-          <p className="text-slate-400 text-sm mt-1">Multi-Agent Swarm with Vector RAG Diagnostics & Conversational WhatsApp LLM Gates</p>
+          <h1 className="text-3xl font-extrabold tracking-tight text-white">Hyper-Local Fleet Swarm Intelligence</h1>
+          <p className="text-slate-400 text-sm mt-1">Deterministic Multi-Agent Swarm with Human-in-the-Loop WhatsApp Interactive Gates</p>
         </header>
 
-        {/* Form Card */}
+        {/* Input Form Card */}
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 shadow-2xl">
-          <h2 className="text-lg font-semibold text-purple-400 mb-4 flex items-center gap-2">
-            <span>🧠</span> Inject Incident & Run Agentic RAG Pipeline
+          <h2 className="text-lg font-semibold text-blue-400 mb-4 flex items-center gap-2">
+            <span>⚡</span> Inject Fleet Incident & HITL Gate
           </h2>
           
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div>
                 <label className="block text-xs font-medium text-slate-400 mb-1">Heavy Fleet Unit ID</label>
-                <select name="vehicle_id" value={formData.vehicle_id} onChange={handleChange} className="w-full p-2.5 bg-slate-950 border border-slate-700 rounded-lg text-sm text-white font-mono">
+                <select name="vehicle_id" value={formData.vehicle_id} onChange={handleChange} className="w-full p-2.5 bg-slate-950 border border-slate-700 rounded-lg text-sm text-white focus:outline-none focus:border-blue-500 font-mono">
                   <option value="BR01GP9621">BR01GP9621</option>
                   <option value="BR01GM7465">BR01GM7465</option>
                   <option value="BR01GP0756">BR01GP0756</option>
@@ -147,35 +148,35 @@ function App() {
               </div>
               <div>
                 <label className="block text-xs font-medium text-slate-400 mb-1">Severity Level</label>
-                <select name="severity" value={formData.severity} onChange={handleChange} className="w-full p-2.5 bg-slate-950 border border-slate-700 rounded-lg text-sm text-white">
+                <select name="severity" value={formData.severity} onChange={handleChange} className="w-full p-2.5 bg-slate-950 border border-slate-700 rounded-lg text-sm text-white focus:outline-none focus:border-blue-500">
                   <option value="CRITICAL">CRITICAL</option>
                   <option value="MODERATE">MODERATE</option>
                 </select>
               </div>
               <div>
                 <label className="block text-xs font-medium text-slate-400 mb-1">Cargo Type</label>
-                <input type="text" name="cargo_type" value={formData.cargo_type} onChange={handleChange} className="w-full p-2.5 bg-slate-950 border border-slate-700 rounded-lg text-sm text-white" required />
+                <input type="text" name="cargo_type" value={formData.cargo_type} onChange={handleChange} className="w-full p-2.5 bg-slate-950 border border-slate-700 rounded-lg text-sm text-white focus:outline-none focus:border-blue-500" required />
               </div>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
-                <label className="block text-xs font-medium text-slate-400 mb-1">Breakdown Location (Origin)</label>
-                <input type="text" name="location" value={formData.location} onChange={handleChange} className="w-full p-2.5 bg-slate-950 border border-slate-700 rounded-lg text-sm text-white" required />
+                <label className="block text-xs font-medium text-slate-400 mb-1">Highway / Breakdown Location (Origin)</label>
+                <input type="text" name="location" value={formData.location} onChange={handleChange} className="w-full p-2.5 bg-slate-950 border border-slate-700 rounded-lg text-sm text-white focus:outline-none focus:border-blue-500" required />
               </div>
               <div>
-                <label className="block text-xs font-medium text-slate-400 mb-1">Destination Workshop / Hub</label>
-                <input type="text" name="destination" value={formData.destination} onChange={handleChange} className="w-full p-2.5 bg-slate-950 border border-slate-700 rounded-lg text-sm text-white" required />
+                <label className="block text-xs font-medium text-slate-400 mb-1">Destination Workshop / Hub (End)</label>
+                <input type="text" name="destination" value={formData.destination} onChange={handleChange} className="w-full p-2.5 bg-slate-950 border border-slate-700 rounded-lg text-sm text-white focus:outline-none focus:border-blue-500" required />
               </div>
             </div>
 
             <div>
               <label className="block text-xs font-medium text-slate-400 mb-1">Issue Type / Breakdown Details</label>
-              <input type="text" name="issue_type" value={formData.issue_type} onChange={handleChange} className="w-full p-2.5 bg-slate-950 border border-slate-700 rounded-lg text-sm text-white" required />
+              <input type="text" name="issue_type" value={formData.issue_type} onChange={handleChange} className="w-full p-2.5 bg-slate-950 border border-slate-700 rounded-lg text-sm text-white focus:outline-none focus:border-blue-500" required />
             </div>
 
-            <button type="submit" disabled={loading} className="w-full bg-purple-600 hover:bg-purple-500 text-white font-medium py-3 rounded-lg transition shadow-lg shadow-purple-600/20 disabled:opacity-50">
-              {loading ? 'Running Vector RAG & Multi-Agent Swarm...' : '🚀 Execute Agentic RAG Swarm & Dispatch WhatsApp Alert'}
+            <button type="submit" disabled={loading} className="w-full bg-blue-600 hover:bg-blue-500 text-white font-medium py-3 rounded-lg transition duration-200 shadow-lg shadow-blue-600/20 disabled:opacity-50">
+              {loading ? 'Executing Swarm & Setting HITL Gate...' : '🚀 Dispatch Swarm & Enable HITL Gate'}
             </button>
           </form>
         </div>
@@ -186,57 +187,33 @@ function App() {
           </div>
         )}
 
+        {/* Execution Results & HITL Interactive Panel */}
         {responseResult && (
           <div className="space-y-6">
             
-            {/* Agentic RAG Diagnostics Card */}
-            {ragTrace && (
-              <div className="bg-slate-900 border border-purple-500/40 rounded-xl p-6 shadow-xl">
-                <h3 className="text-base font-bold text-purple-400 mb-3 flex items-center gap-2">
-                  <span>🔬</span> Agentic RAG Vector Search & Part Diagnostic Result
-                </h3>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
-                  <div className="bg-slate-950 p-3 rounded-lg border border-slate-800">
-                    <span className="text-slate-400 block mb-1">Vector Match Score</span>
-                    <span className="text-emerald-400 font-bold text-sm">{(ragTrace.vector_match_score * 100).toFixed(0)}% Accuracy</span>
-                  </div>
-                  <div className="bg-slate-950 p-3 rounded-lg border border-slate-800 md:col-span-2">
-                    <span className="text-slate-400 block mb-1">Referenced Technical Manual</span>
-                    <span className="text-slate-200 font-mono">{ragTrace.referenced_manual}</span>
-                  </div>
-                </div>
-                <div className="mt-3 bg-slate-950 p-3 rounded-lg border border-slate-800 text-xs">
-                  <span className="text-slate-400 block mb-1">AI Diagnostic & Part Recommendation:</span>
-                  <span className="text-amber-300 font-bold">{ragTrace.recommended_part}</span> — <span className="text-slate-300">{ragTrace.diagnostic_summary}</span>
-                </div>
-              </div>
-            )}
-
-            {/* HITL & WhatsApp Conversational Status Card */}
             <div className="bg-gradient-to-br from-slate-900 to-slate-950 border border-blue-500/30 rounded-xl p-6 shadow-2xl relative overflow-hidden">
-              <div className="absolute top-0 right-0 bg-purple-600 text-white text-[10px] font-bold px-3 py-1 rounded-bl-xl uppercase tracking-wider">
-                Conversational LLM Gate Active
+              <div className="absolute top-0 right-0 bg-amber-600 text-white text-[10px] font-bold px-3 py-1 rounded-bl-xl uppercase tracking-wider">
+                HITL Approval Gate Active
               </div>
 
               <h3 className="text-lg font-bold text-white mb-3 flex items-center gap-2">
-                <span>💬</span> WhatsApp Interactive & Natural Language Agent Gate
+                <span>🛡️</span> Human-in-the-Loop WhatsApp Interactive Workflow
               </h3>
 
+              {/* Approval Status Banner with Live Polling */}
               <div className={`p-4 rounded-lg mb-5 border flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 ${
-                approvalStatus.includes('APPROVED')
+                approvalStatus === 'APPROVED_AND_DISPATCHED' 
                   ? 'bg-emerald-950/50 border-emerald-500/40 text-emerald-300' 
-                  : approvalStatus.includes('REJECTED')
+                  : approvalStatus === 'REJECTED_REROUTING'
                   ? 'bg-rose-950/50 border-rose-500/40 text-rose-300'
                   : 'bg-amber-950/40 border-amber-500/30 text-amber-300'
               }`}>
                 <div>
-                  <span className="text-[10px] uppercase font-bold tracking-wider block opacity-80">Manager Response State</span>
+                  <span className="text-[10px] uppercase font-bold tracking-wider block opacity-80">Manager WhatsApp Status</span>
                   <div className="text-sm font-bold mt-0.5">
-                    {approvalStatus === 'APPROVED_AND_DISPATCHED' && '✅ Approved via Button Click (Mechanic & Part Dispatched)'}
-                    {approvalStatus === 'APPROVED_LOCAL_MECHANIC_REROUTED' && '🔄 Approved via LLM Text Parsing (Local Mechanic Rerouted)'}
-                    {approvalStatus.includes('CUSTOM_INSTRUCTION') && `📝 Custom LLM Instruction Logged: ${approvalStatus}`}
-                    {approvalStatus === 'REJECTED_REROUTING' && '❌ Rejected & Rerouting Triggered'}
-                    {approvalStatus === 'PENDING_MANAGER_APPROVAL' && '⏳ Waiting for WhatsApp Button Click OR Natural Language Text Reply...'}
+                    {approvalStatus === 'APPROVED_AND_DISPATCHED' && '✅ Approved by Manager via WhatsApp (ERP State Committed & Mechanic Dispatched)'}
+                    {approvalStatus === 'REJECTED_REROUTING' && '❌ Rejected by Manager via WhatsApp (Rerouting Triggered)'}
+                    {approvalStatus === 'PENDING_MANAGER_APPROVAL' && '⏳ Waiting for WhatsApp Interactive Click... (Check Phone)'}
                   </div>
                 </div>
 
@@ -244,9 +221,9 @@ function App() {
                   {approvalStatus === 'PENDING_MANAGER_APPROVAL' && (
                     <button 
                       onClick={handleTriggerInteractiveApproval}
-                      className="bg-purple-600 hover:bg-purple-500 text-white text-xs font-semibold py-2 px-3 rounded transition shadow"
+                      className="bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold py-2 px-3 rounded transition shadow"
                     >
-                      📲 Send Agentic RAG Alert to WhatsApp
+                      📲 Send Buttons to WhatsApp
                     </button>
                   )}
                 </div>
@@ -256,7 +233,7 @@ function App() {
                 <div className="bg-slate-950/80 p-4 rounded-lg border border-slate-800">
                   <span className="text-xs text-slate-400 block uppercase tracking-wider mb-1">Total Distance & ETA</span>
                   <div className="text-xl font-extrabold text-blue-400">
-                    {routingTrace?.total_distance || '310 km'} <span className="text-sm font-normal text-slate-300">({routingTrace?.estimated_travel_time || '6 hours'})</span>
+                    {routingTrace?.total_distance || 'N/A'} <span className="text-sm font-normal text-slate-300">({routingTrace?.estimated_travel_time || 'N/A'})</span>
                   </div>
                 </div>
 
@@ -278,15 +255,15 @@ function App() {
                 </div>
               </div>
 
-              {/* Hubs List */}
+              {/* Numbered List */}
               <div className="bg-slate-900/90 p-4 rounded-lg border border-slate-800 mb-5">
-                <strong className="text-white block mb-3 text-xs uppercase tracking-wider text-purple-400">
+                <strong className="text-white block mb-3 text-xs uppercase tracking-wider text-blue-400">
                   Detected Authorized Service Centers:
                 </strong>
                 <ul className="space-y-2.5 text-xs text-slate-300">
                   {allNearbyHubs.map((hubName, idx) => (
                     <li key={idx} className="bg-slate-950 p-3 rounded-lg border border-slate-800/80 font-mono flex items-start gap-3 shadow-inner">
-                      <span className="text-purple-400 font-bold text-sm bg-purple-950/50 px-2 py-0.5 rounded border border-purple-800/40">{idx + 1}</span>
+                      <span className="text-emerald-400 font-bold text-sm bg-emerald-950/50 px-2 py-0.5 rounded border border-emerald-800/40">{idx + 1}</span>
                       <span className="text-slate-200 leading-relaxed self-center">{typeof hubName === 'string' ? hubName.replace(/^\d+\.\s*/, '') : JSON.stringify(hubName)}</span>
                     </li>
                   ))}
