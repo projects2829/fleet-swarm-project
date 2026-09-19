@@ -199,7 +199,7 @@ class EnterpriseAgenticRAGOrchestrator:
     def run_swarm(self) -> TriageResponse:
         map_route = self._fetch_google_maps_route()
         service_intel = self._get_heavy_service_center_intelligence()
-        rag_intel = self._agentic_rag_diagnostics()
+        rag_intel = self.run_agentic_rag_diagnostics()
         detected_hubs = service_intel.get("all_detected_hubs", [])
 
         clean_vid = self.incident.vehicle_id.strip().upper()
