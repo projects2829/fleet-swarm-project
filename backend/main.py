@@ -542,10 +542,10 @@ async def whatsapp_webhook(request: Request):
                     inc_id = payload_id.split("APPROVE_")[1]
                     APPROVAL_STATES[inc_id] = "APPROVED_AND_DISPATCHED"
                     
-                    # 1. Manager ko confirmation bhejo
-                    send_whatsapp_text_reply(raw_sender_phone, "✅ Repair approved successfully — dispatch & driver notification initiated.")
+                    # 1. Sabse pehle Manager ko confirmation bhejo ki approval mil gaya hai
+                    send_whatsapp_text_reply(raw_sender_phone, "✅ Repair approved successfully by management. Dispatch sequence is active.")
                     
-                    # 2. Gaari ki ID se mapped driver ka number dhoondho aur use alert bhejo
+                    # 2. AB GAARI SE MAPPED DRIVER KO ALERT BHEJO (Jaise BR01GP9621 ke liye 7858847385)
                     incident_ctx = INCIDENT_DETAILS.get(inc_id, {})
                     vehicle_id = incident_ctx.get("vehicle_id")
                     hub = incident_ctx.get("hub")
@@ -553,23 +553,24 @@ async def whatsapp_webhook(request: Request):
                     
                     driver_phone = FLEET_WHATSAPP_MAPPING.get(vehicle_id)
                     if driver_phone:
-                        # Driver ko active context mein register karo taaki woh AI se chat kar sake
+                        # Driver ko active context mein register karo taaki woh AI agent se baat kar sake
                         cleaned_driver_10 = ''.join(filter(str.isdigit, driver_phone))[-10:]
                         INCIDENT_CONTEXTS[cleaned_driver_10] = inc_id
                         ACTIVE_VEHICLE_BY_PHONE[cleaned_driver_10] = vehicle_id
                         
-                        # Driver ko dispatch message bhejo
+                        # Driver ko official dispatch message bhejo
                         driver_msg = (
-                            f"🚨 *FLEET DISPATCH ALERT (Vehicle: {vehicle_id})*\n\n"
-                            f"Your repair has been *APPROVED* by management.\n"
-                            f"🛠️ *Assigned Hub:* {hub}\n"
+                            f"🚨 *OFFICIAL FLEET DISPATCH ALERT*\n\n"
+                            f"🚜 *Vehicle:* {vehicle_id}\n"
+                            f"Status: Repair *APPROVED* by Management.\n"
+                            f"🛠️ *Assigned Workshop:* {hub}\n"
                             f"⚙️ *Required Part:* {recommended_part}\n\n"
-                            f"You can now reply directly on this chat with any updates, questions, or issues for the AI Agent."
+                            f"You can now reply directly on this chat with your live updates or issues for the AI Operations Agent."
                         )
                         send_whatsapp_text_reply(driver_phone, driver_msg)
-                        print(f"DEBUG: Dispatched notification to driver at {driver_phone} for vehicle {vehicle_id}")
+                        print(f"DEBUG: Manager approved. Dispatched notification to driver at {driver_phone} for vehicle {vehicle_id}")
 
-                    return {"status": "success", "action": "Approved and driver notified."}
+                    return {"status": "success", "action": "Approved by manager and driver notified."}
 
                 elif "REJECT_" in payload_id:
                     inc_id = payload_id.split("REJECT_")[1]
