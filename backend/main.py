@@ -4,11 +4,11 @@ import uuid
 import re
 from typing import List, Dict, Any, Optional
 import requests
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-app = FastAPI(title="Hyper-Local Fleet Swarm Intelligence Engine", version="3.7.0")
+app = FastAPI(title="Hyper-Local Fleet Swarm Intelligence Engine", version="3.8.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -26,6 +26,12 @@ FLEET_WHATSAPP_MAPPING = {
     "BR01GP0757": "+916209313108",
     "BR01GP8148": "+916209313108"
 }
+
+# In-memory storage to track approval states for HITL simulation
+APPROVAL_STATES = {}
+
+WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
+WHATSAPP_PHONE_ID = os.getenv("WHATSAPP_PHONE_ID", "YOUR_PHONE_NUMBER_ID")
 
 class IncidentInput(BaseModel):
     vehicle_id: str
@@ -48,6 +54,7 @@ class TriageResponse(BaseModel):
     execution_time_ms: float
     deterministic_steps_executed: int
     assigned_whatsapp_number: str
+    approval_status: str
     traces: List[AgentTrace]
     final_resolution: Dict[str, Any]
 
@@ -163,9 +170,11 @@ class HyperLocalSwarmOrchestrator:
         service_intel = self._get_heavy_service_center_intelligence()
         detected_hubs = service_intel.get("all_detected_hubs", [])
 
-        # Normalize vehicle ID key search
         clean_vid = self.incident.vehicle_id.strip().upper()
-        assigned_phone = FLEET_WHATSAPP_MAPPING.get(clean_vid, "+919835011111") # Default fallback
+        assigned_phone = FLEET_WHATSAPP_MAPPING.get(clean_vid, "+919835011111")
+
+        # Initialize HITL approval state in memory
+        APPROVAL_STATES[self.incident_id] = "PENDING_MANAGER_APPROVAL"
 
         # 1. Supervisor Agent
         self.step_counter += 1
@@ -178,7 +187,7 @@ class HyperLocalSwarmOrchestrator:
             "destination_workshop": service_intel["hub"],
             "all_nearby_service_centers": detected_hubs,
             "issue_detected": self.incident.issue_type,
-            "risk_score": 0.94 if self.incident.severity == "CRITICAL" else 0.70
+            "hitl_status": "WAITING_FOR_WHATSAPP_INTERACTIVE_BUTTON"
         }
         self.traces.append(AgentTrace(step_name="Supervisor_Triage", agent_role="Supervisor Agent", status="SUCCESS", timestamp=round((time.time() - t_start) * 1000, 2), output_payload=sup_dec))
 
@@ -189,35 +198,26 @@ class HyperLocalSwarmOrchestrator:
             "total_distance": map_route["distance_text"] if map_route else "310 km",
             "estimated_travel_time": map_route["duration_text"] if map_route else "6 hours",
             "primary_route_status": "HEAVY_CORRIDOR_OPTIMIZED",
-            "hyper_accurate_alternative_route": f"Optimized transit from {self.incident.location} to {service_intel['hub'].split('—')[0]}"
+            "hyper_accurate_alternative_route": f"Optimized transit to {service_intel['hub'].split('—')[0]}"
         }
         self.traces.append(AgentTrace(step_name="Routing_Recalculation", agent_role="Routing Agent", status="SUCCESS", timestamp=round((time.time() - t_start) * 1000, 2), output_payload=routing))
 
-        # 3. Procurement Agent
-        self.step_counter += 1
-        t_start = time.time()
-        proc = {
-            "nearest_operational_hub": service_intel["hub"],
-            "all_nearby_service_centers": detected_hubs,
-            "inventory_status": f"Spares locked for {self.incident.vehicle_id}"
-        }
-        self.traces.append(AgentTrace(step_name="Procurement_Vendor_Negotiation", agent_role="Procurement Agent", status="SUCCESS", timestamp=round((time.time() - t_start) * 1000, 2), output_payload=proc))
-
-        # 4. ERP Sync Agent
+        # 3. ERP Sync Agent
         self.step_counter += 1
         t_start = time.time()
         erp = {
             "erp_transaction_id": f"TXN-ERP-{uuid.uuid4().hex[:6].upper()}",
-            "ledger_status": "COMMITTED"
+            "ledger_status": "PENDING_HITL_APPROVAL"
         }
         self.traces.append(AgentTrace(step_name="ERP_State_Commit", agent_role="ERP Sync Agent", status="SUCCESS", timestamp=round((time.time() - t_start) * 1000, 2), output_payload=erp))
 
         return TriageResponse(
             incident_id=self.incident_id,
-            status="RESOLVED_VIA_SWARM",
+            status="AWAITING_HITL_APPROVAL",
             execution_time_ms=round((time.time() - self.start_time) * 1000, 2),
             deterministic_steps_executed=self.step_counter,
             assigned_whatsapp_number=assigned_phone,
+            approval_status=APPROVAL_STATES[self.incident_id],
             traces=self.traces,
             final_resolution={
                 "vehicle_id": self.incident.vehicle_id,
@@ -225,7 +225,7 @@ class HyperLocalSwarmOrchestrator:
                 "origin": self.incident.location,
                 "primary_nearest_hub": service_intel["hub"],
                 "all_available_service_centers": detected_hubs,
-                "mitigation_summary": f"Swarm rerouted heavy unit {self.incident.vehicle_id} to closest repair hub: {service_intel['hub']}.",
+                "mitigation_summary": f"Incident logged for {self.incident.vehicle_id}. Waiting for Operations Manager WhatsApp Interactive Approval.",
                 "erp_ref": erp["erp_transaction_id"]
             }
         )
@@ -234,6 +234,77 @@ class HyperLocalSwarmOrchestrator:
 async def trigger_triage(incident: IncidentInput):
     return HyperLocalSwarmOrchestrator(incident).run_swarm()
 
+# Endpoint to trigger WhatsApp Interactive Buttons via Meta Cloud API
+@app.post("/api/send-whatsapp-interactive")
+async def send_whatsapp_interactive(payload: dict):
+    incident_id = payload.get("incident_id")
+    phone = payload.get("phone")
+    vehicle_id = payload.get("vehicle_id")
+    hub = payload.get("hub")
+
+    # If Meta API Token is configured, dispatch real interactive buttons
+    if WHATSAPP_TOKEN and WHATSAPP_TOKEN != "YOUR_TOKEN":
+        url = f"https://graph.facebook.com/v17.0/{WHATSAPP_PHONE_ID}/messages"
+        headers = {
+            "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+            "Content-Type": "application/json"
+        }
+        body = {
+            "messaging_product": "whatsapp",
+            "to": phone,
+            "type": "interactive",
+            "interactive": {
+                "type": "button",
+                "body": {
+                    "text": f"🚨 *HITL APPROVAL REQUEST* \nVehicle: *{vehicle_id}*\nNearest Hub:\n{hub}\n\nAuthorize immediate repair & dispatch?"
+                },
+                "action": {
+                    "buttons": [
+                        {"type": "reply", "id": f"APPROVE_{incident_id}", "title": "Approve Repair ✅"},
+                        {"type": "reply", "id": f"REJECT_{incident_id}", "title": "Reject & Reroute ❌"}
+                    ]
+                }
+            }
+        }
+        res = requests.post(url, json=body, headers=headers)
+        return {"status": "dispatched_via_meta_api", "response": res.json()}
+    
+    # Fallback simulation response for testing UI
+    return {
+        "status": "simulated_interactive_dispatched",
+        "message": f"WhatsApp interactive buttons sent successfully to {phone} for incident {incident_id}."
+    }
+
+# Webhook listener for incoming WhatsApp button clicks
+@app.post("/api/whatsapp-webhook")
+async def whatsapp_webhook(request: Request):
+    data = await request.json()
+    try:
+        # Parse Meta WhatsApp incoming interactive button reply structure
+        entry = data.get("entry", [{}])[0]
+        changes = entry.get("changes", [{}])[0]
+        value = changes.get("value", {})
+        messages = value.get("messages", [])
+
+        if messages:
+            msg = messages[0]
+            if msg.get("type") == "interactive":
+                button_reply = msg["interactive"].get("button_reply", {})
+                payload_id = button_reply.get("id", "") # e.g. APPROVE_INC-12345
+                
+                if "APPROVE_" in payload_id:
+                    inc_id = payload_id.split("APPROVE_")[1]
+                    APPROVAL_STATES[inc_id] = "APPROVED_AND_DISPATCHED"
+                    return {"status": "success", "action": "ERP state committed, mechanic dispatched."}
+                elif "REJECT_" in payload_id:
+                    inc_id = payload_id.split("REJECT_")[1]
+                    APPROVAL_STATES[inc_id] = "REJECTED_REROUTING"
+                    return {"status": "success", "action": "Rerouting triggered."}
+    except Exception as e:
+        return {"status": "error", "details": str(e)}
+
+    return {"status": "received"}
+
 @app.get("/api/health")
 async def health_check():
-    return {"status": "online"}
+    return {"status": "online", "engine": "HITL Swarm Orchestrator v3.8.0"}
