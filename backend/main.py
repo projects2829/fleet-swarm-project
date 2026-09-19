@@ -83,29 +83,33 @@ def send_whatsapp_text_reply(to_phone: str, text: str):
 
 def call_ai_agent(manager_text: str, incident_ctx: dict) -> dict:
     """
-    Sends the manager's WhatsApp reply + incident context to Gemini API,
-    classifies intent, and drafts a short WhatsApp reply in English.
+    Har ek incoming message ko Gemini AI Agent ke paas bhejta hai,
+    uska smart decision nikalta hai aur professional WhatsApp reply banata hai.
     """
-    fallback = _keyword_fallback(manager_text)
-
     if not GEMINI_API_KEY:
-        return fallback
+        return _keyword_fallback(manager_text)
 
     system_prompt = (
-        "You are a professional fleet operations assistant replying to a manager on WhatsApp. "
-        "The manager just sent a free-text instruction about a vehicle breakdown incident. "
-        "Classify their intent into exactly one of: APPROVED_AND_DISPATCHED, "
-        "APPROVED_LOCAL_MECHANIC_REROUTED, REJECTED_REROUTING, or CUSTOM_INSTRUCTION_LOGGED. "
-        "Then write a short (1-2 sentence) professional WhatsApp reply strictly in English, "
-        "confirming what will happen next. "
-        "Respond ONLY as valid JSON in this exact format: {\"decision\": \"...\", \"reply_text\": \"...\"}."
+        "You are an advanced Autonomous Enterprise Fleet Operations AI Agent for Beekay Infra & Logistics. "
+        "A manager has sent a text reply on WhatsApp regarding a heavy commercial vehicle breakdown incident. "
+        "Your job is to analyze their instructions, classify their decision into one of these exact states: "
+        "1. APPROVED_AND_DISPATCHED\n"
+        "2. APPROVED_LOCAL_MECHANIC_REROUTED\n"
+        "3. REJECTED_REROUTING\n"
+        "4. CUSTOM_INSTRUCTION_LOGGED (if they gave specific instructions like alternative workshop, parts change, or driver guidelines).\n\n"
+        "Then, write a smart, professional, polite WhatsApp reply (1-2 sentences) strictly in English, "
+        "acknowledging their exact instruction and confirming the operational next steps.\n\n"
+        "Respond ONLY as valid JSON in this exact format without any markdown code blocks: "
+        "{\"decision\": \"...\", \"reply_text\": \"...\"}"
     )
 
     user_prompt = (
-        f"Incident context: vehicle={incident_ctx.get('vehicle_id')}, "
-        f"issue={incident_ctx.get('issue_type')}, hub={incident_ctx.get('hub')}, "
-        f"recommended_part={incident_ctx.get('recommended_part')}.\n"
-        f"Manager's WhatsApp message: \"{manager_text}\""
+        f"Incident Context:\n"
+        f"- Vehicle ID: {incident_ctx.get('vehicle_id')}\n"
+        f"- Issue Type: {incident_ctx.get('issue_type')}\n"
+        f"- Assigned Hub: {incident_ctx.get('hub')}\n"
+        f"- RAG Suggested Part: {incident_ctx.get('recommended_part')}\n\n"
+        f"Manager's WhatsApp Message: \"{manager_text}\""
     )
 
     try:
@@ -119,21 +123,26 @@ def call_ai_agent(manager_text: str, incident_ctx: dict) -> dict:
                 }
             ],
             "generationConfig": {
-                "temperature": 0.2,
+                "temperature": 0.3,
                 "response_mime_type": "application/json"
             }
         }
         res = requests.post(url, json=payload, timeout=15)
         res.raise_for_status()
         data = res.json()
+        
+        # Extract text safely from Gemini response
         content = data["candidates"][0]["content"]["parts"][0]["text"]
-        parsed = json.loads(content)
+        # Clean potential markdown formatting if Gemini adds it
+        cleaned_content = content.replace("```json", "").replace("```", "").strip()
+        parsed = json.loads(cleaned_content)
+        
         if parsed.get("decision") and parsed.get("reply_text"):
             return parsed
-        return fallback
-    except Exception:
-        return fallback
-
+        return _keyword_fallback(manager_text)
+    except Exception as e:
+        print(f"DEBUG GEMINI AI ERROR: {str(e)}")
+        return _keyword_fallback(manager_text)
 
 def _keyword_fallback(text_body: str) -> dict:
     t = text_body.lower()
@@ -469,11 +478,10 @@ async def whatsapp_webhook(request: Request):
         if messages:
             msg = messages[0]
             raw_sender_phone = msg.get("from", "")
-            # Sirf last ke 10 digits nikal lo taaki country code (+91) ka koi issue na aaye
             sender_10_digit = ''.join(filter(str.isdigit, raw_sender_phone))[-10:]
             print(f"DEBUG: Sender 10-digit extracted: {sender_10_digit}")
             
-            # Case A: Button Click Response
+            # Case A: Button Click Response (Approve / Reject buttons)
             if msg.get("type") == "interactive":
                 button_reply = msg["interactive"].get("button_reply", {})
                 payload_id = button_reply.get("id", "")
@@ -492,10 +500,10 @@ async def whatsapp_webhook(request: Request):
                     print("DEBUG REPLY SENT RESPONSE:", resp)
                     return {"status": "success", "action": "Rejected via button click."}
             
-            # Case B: Conversational LLM / Gemini Natural Language Text Response
+            # Case B: Free Text Message -> Handled 100% by Gemini AI Agent
             elif msg.get("type") == "text":
                 text_body = msg["text"].get("body", "")
-                print(f"DEBUG: Text message received: {text_body}")
+                print(f"DEBUG: Text message received for AI: {text_body}")
                 
                 matched_inc_id = None
                 for phone, inc_id in INCIDENT_CONTEXTS.items():
@@ -504,20 +512,19 @@ async def whatsapp_webhook(request: Request):
                         matched_inc_id = inc_id
                         break
                 
-                # Agar direct match na mile, toh jo sabse aakhri incident active tha use utha lo
                 if not matched_inc_id and INCIDENT_CONTEXTS:
                     matched_inc_id = list(INCIDENT_CONTEXTS.values())[-1]
                 
                 if matched_inc_id:
                     incident_ctx = INCIDENT_DETAILS.get(matched_inc_id, {})
+                    # Call Gemini AI Agent to parse intent & draft professional reply
                     ai_result = call_ai_agent(text_body, incident_ctx)
                     APPROVAL_STATES[matched_inc_id] = ai_result["decision"]
                     resp = send_whatsapp_text_reply(raw_sender_phone, ai_result["reply_text"])
-                    print("DEBUG AI REPLY SENT:", resp)
-                    return {"status": "success", "action": "AI agent replied.", "decision": ai_result["decision"]}
+                    print("DEBUG AI AGENT SMART REPLY SENT:", resp)
+                    return {"status": "success", "action": "Smart AI agent replied.", "decision": ai_result["decision"]}
                 else:
-                    # Agar koi incident context hi nahi mila
-                    send_whatsapp_text_reply(raw_sender_phone, "⚠️ No active fleet incident found for your session.")
+                    send_whatsapp_text_reply(raw_sender_phone, "⚠️ No active fleet incident context found for your session.")
                     return {"status": "error", "action": "No active incident context found."}
                     
     except Exception as e:
