@@ -7,7 +7,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-app = FastAPI(title="Hyper-Local Fleet Swarm Intelligence Engine", version="3.3.0")
+app = FastAPI(title="Hyper-Local Fleet Swarm Intelligence Engine", version="3.4.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -80,7 +80,7 @@ class HyperLocalSwarmOrchestrator:
         return None
 
     def _get_heavy_service_center_intelligence(self):
-        """Fetches all nearby authorized Tata CV and Eicher Service Centers via Google Maps Places API"""
+        """Fetches all nearby authorized Tata CV and Eicher Service Centers via Google Maps Places API with Numbering"""
         if GOOGLE_MAPS_API_KEY:
             places_url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
             query_str = f"Tata commercial vehicle service center OR Eicher workshop near {self.incident.location}"
@@ -95,30 +95,34 @@ class HyperLocalSwarmOrchestrator:
                 # Check if Google Places API returned successful results
                 if data.get("status") == "OK" and data.get("results"):
                     formatted_hubs = []
-                    for place in data["results"][:5]:  # Top 5 nearby service centers
+                    # Top 5 nearby service centers numbered 1 to N
+                    for idx, place in enumerate(data["results"][:5], 1):
                         name = place.get('name', 'Service Center')
                         address = place.get('formatted_address', '')
                         rating = place.get('rating', 'N/A')
-                        formatted_hubs.append(f"{name} — {address} (Rating: {rating})")
+                        formatted_hubs.append(f"{idx}. {name} — {address} (Rating: {rating})")
 
                     primary_hub = formatted_hubs[0] if formatted_hubs else "Authorized Tata CV & Eicher Service Hub"
                     return {
                         "corridor": self.incident.location,
                         "alt_route": f"Google Maps API Multi-Hub Corridor from {self.incident.location}",
                         "hub": primary_hub,
-                        "all_detected_hubs": formatted_hubs,  # Saare aas-paas ke service centers ki list
+                        "all_detected_hubs": formatted_hubs,  # Saare numbered hubs ki list
                         "delay_saved": 4.0
                     }
             except Exception as e:
                 pass
 
         # Fallback if API Key is missing or request fails
-        fallback_hub = f"Authorized Tata CV & Eicher Service Hub, {self.incident.location}"
+        fallback_list = [
+            f"1. Authorized Tata Motors CV Service Station, {self.incident.location}",
+            f"2. Eicher Commercial Heavy Workshop, Main Bypass Corridor"
+        ]
         return {
             "corridor": self.incident.location,
             "alt_route": f"Heavy Transit Corridor linking {self.incident.location}",
-            "hub": fallback_hub,
-            "all_detected_hubs": [fallback_hub, "Regional Heavy Truck Workshop, Main Corridor Bypass"],
+            "hub": fallback_list[0],
+            "all_detected_hubs": fallback_list,
             "delay_saved": 3.0
         }
 
@@ -165,7 +169,7 @@ class HyperLocalSwarmOrchestrator:
             }
         self.traces.append(AgentTrace(step_name="Routing_Recalculation", agent_role="Routing Agent", status="SUCCESS", timestamp=round((time.time() - t_start) * 1000, 2), output_payload=routing))
 
-        # 3. Procurement Agent (Tata & Eicher Parts & Service Dispatch)
+        # 3. Procurement Agent
         self.step_counter += 1
         t_start = time.time()
         proc = {
@@ -224,4 +228,4 @@ async def trigger_triage(incident: IncidentInput):
 
 @app.get("/api/health")
 async def health_check():
-    return {"status": "online", "engine": "Hyper-Local Fleet Swarm with Multi-Hub Tata/Eicher Places API Integration"}
+    return {"status": "online", "engine": "Hyper-Local Fleet Swarm with Numbered Multi-Hub Tata/Eicher Places API Integration"}
