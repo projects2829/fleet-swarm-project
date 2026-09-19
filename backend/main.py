@@ -67,20 +67,36 @@ class TriageResponse(BaseModel):
 
 
 def send_whatsapp_text_reply(to_phone: str, text: str):
-    """Sends a plain text reply back to the manager on WhatsApp."""
+    """Sends a plain text reply back on WhatsApp with automatic fallback simulation."""
     if not WHATSAPP_TOKEN or WHATSAPP_TOKEN == "YOUR_TOKEN":
+        print(f"SIMULATED WHATSAPP TO [{to_phone}]: {text}")
         return {"status": "simulated_reply", "text": text}
+    
+    cleaned_to_phone = ''.join(filter(str.isdigit, to_phone))
+    
     url = f"https://graph.facebook.com/v26.0/{WHATSAPP_PHONE_ID}/messages"
-    headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}", 
+        "Content-Type": "application/json"
+    }
     body = {
         "messaging_product": "whatsapp",
-        "to": to_phone,
+        "to": cleaned_to_phone,
         "type": "text",
         "text": {"body": text}
     }
-    res = requests.post(url, json=body, headers=headers, timeout=10)
-    return {"status_code": res.status_code, "response": res.json() if res.content else {}}
-
+    try:
+        res = requests.post(url, json=body, headers=headers, timeout=10)
+        print(f"DEBUG META WHATSAPP API RESPONSE [{res.status_code}]:", res.text)
+        
+        # Agar Meta API se error aaye, toh terminal par message print kar do taaki pata chale
+        if res.status_code != 200:
+            print(f"⚠️ Meta API Error: Could not deliver WhatsApp message to {cleaned_to_phone}. Check token or test number verification.")
+            
+        return {"status_code": res.status_code, "response": res.json() if res.content else {}}
+    except Exception as e:
+        print(f"DEBUG META API EXCEPTION: {str(e)}")
+        return {"status": "error", "details": str(e)}
 
 def call_ai_agent(manager_text: str, incident_ctx: dict) -> dict:
     """
