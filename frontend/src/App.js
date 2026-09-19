@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import './App.css';
 
 function App() {
@@ -14,7 +14,7 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [responseResult, setResponseResult] = useState(null);
   const [error, setError] = useState(null);
-  const [approvalStatus, setApprovalStatus] = useState('PENDING');
+  const [approvalStatus, setApprovalStatus] = useState('PENDING_MANAGER_APPROVAL');
 
   const handleChange = (e) => {
     setFormData({ ...formData, [e.target.name]: e.target.value });
@@ -25,7 +25,7 @@ function App() {
     setLoading(true);
     setError(null);
     setResponseResult(null);
-    setApprovalStatus('PENDING');
+    setApprovalStatus('PENDING_MANAGER_APPROVAL');
 
     const API_URL = process.env.REACT_APP_API_URL || 'https://fleet-swarm-backend.onrender.com';
 
@@ -39,7 +39,7 @@ function App() {
       const data = await res.json();
       if (res.ok) {
         setResponseResult(data);
-        setApprovalStatus(data.approval_status);
+        setApprovalStatus(data.approval_status || 'PENDING_MANAGER_APPROVAL');
       } else {
         setError(data.detail || 'Validation error from backend.');
       }
@@ -49,6 +49,34 @@ function App() {
       setLoading(false);
     }
   };
+
+  // 🔄 Live Polling Effect: Track WhatsApp Webhook response automatically every 3 seconds
+  useEffect(() => {
+    if (!responseResult?.incident_id) return;
+
+    const API_URL = process.env.REACT_APP_API_URL || 'https://fleet-swarm-backend.onrender.com';
+    const incidentId = responseResult.incident_id;
+
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch(`${API_URL}/api/approval-status/${incidentId}`);
+        const data = await res.json();
+
+        if (data && data.approval_status) {
+          setApprovalStatus(data.approval_status);
+
+          // Stop polling once manager takes action
+          if (data.approval_status === 'APPROVED_AND_DISPATCHED' || data.approval_status === 'REJECTED_REROUTING') {
+            clearInterval(interval);
+          }
+        }
+      } catch (err) {
+        console.error("Polling error:", err);
+      }
+    }, 3000);
+
+    return () => clearInterval(interval);
+  }, [responseResult?.incident_id]);
 
   const routingTrace = responseResult?.traces?.find(t => t.step_name === 'Routing_Recalculation')?.output_payload;
   const procurementTrace = responseResult?.traces?.find(t => t.step_name === 'Procurement_Vendor_Negotiation')?.output_payload;
@@ -77,15 +105,14 @@ function App() {
         })
       });
       const data = await res.json();
-      alert(`HITL Status: ${data.status}\nInteractive Approval Buttons sent to WhatsApp number: ${responseResult.assigned_whatsapp_number}`);
+      if (data.status === 'meta_api_error') {
+        alert(`Meta API Error (${data.status_code}): ${JSON.stringify(data.error_details)}`);
+      } else {
+        alert(`HITL Status: ${data.status}\nInteractive Approval Buttons sent to WhatsApp number: ${responseResult.assigned_whatsapp_number}`);
+      }
     } catch (err) {
       alert('Failed to trigger interactive WhatsApp message.');
     }
-  };
-
-  // Simulate Manager Clicking "Approve Repair" on WhatsApp
-  const handleSimulateManagerApproval = () => {
-    setApprovalStatus('APPROVED_AND_DISPATCHED');
   };
 
   return (
@@ -173,37 +200,31 @@ function App() {
                 <span>🛡️</span> Human-in-the-Loop WhatsApp Interactive Workflow
               </h3>
 
-              {/* Approval Status Banner */}
+              {/* Approval Status Banner with Live Polling */}
               <div className={`p-4 rounded-lg mb-5 border flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 ${
                 approvalStatus === 'APPROVED_AND_DISPATCHED' 
                   ? 'bg-emerald-950/50 border-emerald-500/40 text-emerald-300' 
+                  : approvalStatus === 'REJECTED_REROUTING'
+                  ? 'bg-rose-950/50 border-rose-500/40 text-rose-300'
                   : 'bg-amber-950/40 border-amber-500/30 text-amber-300'
               }`}>
                 <div>
-                  <span className="text-[10px] uppercase font-bold tracking-wider block opacity-80">Manager Approval Status</span>
+                  <span className="text-[10px] uppercase font-bold tracking-wider block opacity-80">Manager WhatsApp Status</span>
                   <div className="text-sm font-bold mt-0.5">
-                    {approvalStatus === 'APPROVED_AND_DISPATCHED' 
-                      ? '✅ Approved by Manager (ERP State Committed & Mechanic Dispatched)' 
-                      : '⏳ Pending Manager Approval (Waiting for WhatsApp Interactive Click)'}
+                    {approvalStatus === 'APPROVED_AND_DISPATCHED' && '✅ Approved by Manager via WhatsApp (ERP State Committed & Mechanic Dispatched)'}
+                    {approvalStatus === 'REJECTED_REROUTING' && '❌ Rejected by Manager via WhatsApp (Rerouting Triggered)'}
+                    {approvalStatus === 'PENDING_MANAGER_APPROVAL' && '⏳ Waiting for WhatsApp Interactive Click... (Check Phone)'}
                   </div>
                 </div>
 
                 <div className="flex gap-2 w-full sm:w-auto">
-                  {approvalStatus !== 'APPROVED_AND_DISPATCHED' && (
-                    <>
-                      <button 
-                        onClick={handleTriggerInteractiveApproval}
-                        className="bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold py-2 px-3 rounded transition"
-                      >
-                        📲 Send Buttons to WhatsApp
-                      </button>
-                      <button 
-                        onClick={handleSimulateManagerApproval}
-                        className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold py-2 px-3 rounded transition"
-                      >
-                        ✅ Simulate "Approve" Click
-                      </button>
-                    </>
+                  {approvalStatus === 'PENDING_MANAGER_APPROVAL' && (
+                    <button 
+                      onClick={handleTriggerInteractiveApproval}
+                      className="bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold py-2 px-3 rounded transition shadow"
+                    >
+                      📲 Send Buttons to WhatsApp
+                    </button>
                   )}
                 </div>
               </div>
