@@ -89,7 +89,7 @@ def call_ai_agent(manager_text: str, incident_ctx: dict) -> dict:
     if not GEMINI_API_KEY:
         return _keyword_fallback(manager_text)
 
-        system_prompt = (
+    system_prompt = (
         "You are an advanced Autonomous Enterprise Fleet Operations AI Agent for Beekay Infra & Logistics. "
         "A manager has sent a WhatsApp message about a vehicle breakdown incident. "
         "First, understand what the manager is ACTUALLY asking or instructing — do not give a generic "
@@ -234,7 +234,7 @@ class EnterpriseAgenticRAGOrchestrator:
             pass
         return None
 
-       def _get_heavy_service_center_intelligence(self):
+    def _get_heavy_service_center_intelligence(self):
         raw_hubs = []
         if GOOGLE_MAPS_API_KEY:
             places_url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
@@ -342,7 +342,7 @@ class EnterpriseAgenticRAGOrchestrator:
 
         APPROVAL_STATES[self.incident_id] = "PENDING_MANAGER_APPROVAL"
         INCIDENT_CONTEXTS[assigned_phone] = self.incident_id
-                INCIDENT_DETAILS[self.incident_id] = {
+        INCIDENT_DETAILS[self.incident_id] = {
             "vehicle_id": self.incident.vehicle_id,
             "issue_type": self.incident.issue_type,
             "hub": service_intel["hub"],
