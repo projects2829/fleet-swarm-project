@@ -65,7 +65,6 @@ function App() {
         if (data && data.approval_status) {
           setApprovalStatus(data.approval_status);
 
-          // Stop polling once manager takes action
           if (data.approval_status === 'APPROVED_AND_DISPATCHED' || data.approval_status === 'REJECTED_REROUTING') {
             clearInterval(interval);
           }
@@ -88,7 +87,7 @@ function App() {
   const googleMapsRouteUrl = `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(formData.location)}&destination=${encodeURIComponent(formData.destination)}&waypoints=${encodeURIComponent(nearestHub)}&travelmode=driving`;
   const googleMapsHubPinUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(nearestHub)}`;
 
-  // Trigger WhatsApp Interactive Buttons Dispatch
+  // Trigger WhatsApp Interactive Buttons Dispatch with complete incident payload
   const handleTriggerInteractiveApproval = async () => {
     if (!responseResult) return;
     const API_URL = process.env.REACT_APP_API_URL || 'https://fleet-swarm-backend.onrender.com';
@@ -101,14 +100,18 @@ function App() {
           incident_id: responseResult.incident_id,
           phone: responseResult.assigned_whatsapp_number,
           vehicle_id: formData.vehicle_id,
-          hub: nearestHub
+          hub: nearestHub,
+          location: formData.location,
+          issue_type: formData.issue_type,
+          severity: formData.severity,
+          cargo_type: formData.cargo_type
         })
       });
       const data = await res.json();
       if (data.status === 'meta_api_error') {
         alert(`Meta API Error (${data.status_code}): ${JSON.stringify(data.error_details)}`);
       } else {
-        alert(`HITL Status: ${data.status}\nInteractive Approval Buttons sent to WhatsApp number: ${responseResult.assigned_whatsapp_number}`);
+        alert(`HITL Status: ${data.status}\nDetailed Incident WhatsApp message sent to: ${responseResult.assigned_whatsapp_number}`);
       }
     } catch (err) {
       alert('Failed to trigger interactive WhatsApp message.');
@@ -223,7 +226,7 @@ function App() {
                       onClick={handleTriggerInteractiveApproval}
                       className="bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold py-2 px-3 rounded transition shadow"
                     >
-                      📲 Send Buttons to WhatsApp
+                      📲 Send Details & Buttons to WhatsApp
                     </button>
                   )}
                 </div>
