@@ -1,13 +1,14 @@
 import os
 import time
 import uuid
+import re
 from typing import List, Dict, Any, Optional
 import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-app = FastAPI(title="Hyper-Local Fleet Swarm Intelligence Engine", version="3.6.0")
+app = FastAPI(title="Hyper-Local Fleet Swarm Intelligence Engine", version="3.6.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -78,7 +79,7 @@ class HyperLocalSwarmOrchestrator:
         return None
 
     def _get_heavy_service_center_intelligence(self):
-        """Fetches authorized Tata CV and Eicher Service Centers, guaranteeing a multi-hub numbered list"""
+        """Fetches authorized Tata CV and Eicher Service Centers with clean numbering"""
         formatted_hubs = []
         
         if GOOGLE_MAPS_API_KEY:
@@ -92,7 +93,7 @@ class HyperLocalSwarmOrchestrator:
                 response = requests.get(places_url, params=params, timeout=7)
                 data = response.json()
                 if data.get("status") == "OK" and data.get("results"):
-                    for idx, place in enumerate(data["results"][:5], 1):
+                    for place in data["results"][:5]:
                         name = place.get('name', 'Service Center')
                         address = place.get('formatted_address', '')
                         rating = place.get('rating', 'N/A')
@@ -100,7 +101,7 @@ class HyperLocalSwarmOrchestrator:
             except Exception:
                 pass
 
-        # Robust Fallback / Supplement to ensure a rich multi-hub list for Patna / Bihar corridor
+        # Robust Fallback / Supplement for Patna / Bihar corridor
         default_heavy_hubs = [
             "TATA.CARS Service Centre - Guinea Motors, Patliputra Industrial Area, Patna, Bihar (Rating: 3.9)",
             "Eicher Commercial Vehicles Workshop, NH-30 Bypass Road, Patna, Bihar (Rating: 4.2)",
@@ -108,13 +109,16 @@ class HyperLocalSwarmOrchestrator:
             "Eicher Trucks & Buses Service Station, Fatuha Industrial Area, Patna, Bihar (Rating: 4.0)"
         ]
 
-        # Merge fetched with defaults if list is short
         for hub in default_heavy_hubs:
             if not any(hub.split("—")[0].strip() in h for h in formatted_hubs):
                 formatted_hubs.append(hub)
 
-        # Number them 1 to N properly
-        numbered_hubs = [f"{idx}. {hub.replace(/^\d+\.\s*/, '')}" for idx, hub in enumerate(formatted_hubs[:5], 1)]
+        # Properly clean leading numbers using standard regex sub and create numbered list
+        numbered_hubs = []
+        for idx, hub in enumerate(formatted_hubs[:5], 1):
+            clean_hub = re.sub(r'^\d+\.\s*', '', hub)
+            numbered_hubs.append(f"{idx}. {clean_hub}")
+
         primary_hub = numbered_hubs[0] if numbered_hubs else "1. Authorized Tata CV & Eicher Service Hub, Patna"
 
         return {
@@ -217,4 +221,4 @@ async def trigger_triage(incident: IncidentInput):
 
 @app.get("/api/health")
 async def health_check():
-    return {"status": "online", "engine": "Fleet Swarm Intelligence Multi-Hub Engine v3.6"}
+    return {"status": "online", "engine": "Fleet Swarm Intelligence Multi-Hub Engine v3.6.1"}
