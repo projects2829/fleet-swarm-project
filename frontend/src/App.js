@@ -47,17 +47,13 @@ function App() {
     }
   };
 
-  // Extract Routing & Procurement details safely if available
   const routingTrace = responseResult?.traces?.find(t => t.step_name === 'Routing_Recalculation')?.output_payload;
   const procurementTrace = responseResult?.traces?.find(t => t.step_name === 'Procurement_Vendor_Negotiation')?.output_payload;
 
-  // Exact Hub name extraction
-  const nearestHub = procurementTrace?.nearest_operational_hub || 'Zero Mile Central Storage Depot, Patna';
+  const nearestHub = procurementTrace?.nearest_operational_hub || 'Authorized Service Hub';
+  const allNearbyHubs = procurementTrace?.all_detected_hubs || [];
 
-  // 1. Directions URL with Hub as Waypoint
   const googleMapsRouteUrl = `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(formData.location)}&destination=${encodeURIComponent(formData.destination)}&waypoints=${encodeURIComponent(nearestHub)}&travelmode=driving`;
-
-  // 2. Direct Pinpoint Search URL for the Nearest Operational Hub
   const googleMapsHubPinUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(nearestHub)}`;
 
   return (
@@ -126,18 +122,17 @@ function App() {
           </div>
         )}
 
-        {/* Execution Results & Dual Map Integration */}
+        {/* Execution Results & Multi-Hub Integration */}
         {responseResult && (
           <div className="space-y-6">
             
-            {/* Interactive Route & Hub Pin Card */}
             <div className="bg-gradient-to-br from-slate-900 to-slate-950 border border-blue-500/30 rounded-xl p-6 shadow-2xl relative overflow-hidden">
               <div className="absolute top-0 right-0 bg-blue-600 text-white text-[10px] font-bold px-3 py-1 rounded-bl-xl uppercase tracking-wider">
-                Live Google Maps Hub & Route Integration
+                Live Google Maps Multi-Hub Integration
               </div>
 
               <h3 className="text-lg font-bold text-white mb-3 flex items-center gap-2">
-                <span>📍</span> Route, Waypoints & Operational Hub Pinpoint
+                <span>📍</span> All Nearby Authorized Service Centers (Numbered List 1 to N)
               </h3>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-5">
@@ -151,22 +146,33 @@ function App() {
 
                 <div className="bg-slate-950/80 p-4 rounded-lg border border-slate-800 flex flex-col justify-between">
                   <div>
-                    <span className="text-xs text-slate-400 block uppercase tracking-wider mb-1">Nearest Operational Hub (Direct Pin)</span>
-                    <div className="text-sm font-bold text-emerald-400">
+                    <span className="text-xs text-slate-400 block uppercase tracking-wider mb-1">Primary Nearest Hub</span>
+                    <div className="text-sm font-bold text-emerald-400 truncate">
                       {nearestHub}
                     </div>
                     <p className="text-xs text-slate-300 mt-1">{procurementTrace?.inventory_status || 'Stock locked 100%'}</p>
                   </div>
-                  {/* Quick Hub Pin Button */}
                   <a 
                     href={googleMapsHubPinUrl}
                     target="_blank" 
                     rel="noopener noreferrer" 
                     className="mt-3 text-center bg-slate-900 hover:bg-slate-800 text-emerald-400 border border-emerald-500/40 text-xs font-semibold py-1.5 px-3 rounded transition flex items-center justify-center gap-1.5"
                   >
-                    <span>🎯</span> Pinpoint Hub on Google Maps
+                    <span>🎯</span> Pinpoint Primary Hub on Google Maps
                   </a>
                 </div>
+              </div>
+
+              {/* Numbered List of All Detected Service Centers */}
+              <div className="bg-slate-900/90 p-4 rounded-lg border border-slate-800 mb-5">
+                <strong className="text-white block mb-2 text-xs uppercase tracking-wider text-blue-400">Detected Authorized Service Centers (Numbered List):</strong>
+                <ul className="space-y-2 text-xs text-slate-300">
+                  {allNearbyHubs.map((hubName, idx) => (
+                    <li key={idx} className="bg-slate-950 p-2.5 rounded border border-slate-800/60 font-mono flex items-start gap-2">
+                      <span className="text-emerald-400 font-bold">{hubName}</span>
+                    </li>
+                  ))}
+                </ul>
               </div>
 
               <div className="bg-slate-900/90 p-3 rounded-lg border border-slate-800 mb-5 text-xs text-slate-300">
@@ -174,7 +180,6 @@ function App() {
                 <p className="text-slate-400 font-mono">{routingTrace?.hyper_accurate_alternative_route || 'Direct Corridor Route'}</p>
               </div>
 
-              {/* Direct Multi-Stop Open in Google Maps Button */}
               <a 
                 href={googleMapsRouteUrl} 
                 target="_blank" 
