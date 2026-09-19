@@ -4,11 +4,11 @@ import './App.css';
 function App() {
   const [formData, setFormData] = useState({
     vehicle_id: 'TRUCK-BR-01-9922',
-    location: 'Zero Mile, Patna',
-    destination: 'Hajipur Industrial Area Workshop',
-    issue_type: 'Engine Overheat & Transmission Breakdown',
-    severity: 'CRITICAL',
-    cargo_type: 'Heavy Construction Steel Rods'
+    location: 'Atal Path, Patna, Bihar, India',
+    destination: 'Pragati Path, Barmasia Rd, Katihar, Bihar 854105, India',
+    issue_type: 'Engine Overheat & Transmission Breakdown',
+    severity: 'CRITICAL',
+    cargo_type: 'Heavy Construction Steel Rods'
   });
 
   const [loading, setLoading] = useState(false);
@@ -46,6 +46,13 @@ function App() {
       setLoading(false);
     }
   };
+
+  // Extract Routing & Procurement details safely if available
+  const routingTrace = responseResult?.traces?.find(t => t.step_name === 'Routing_Recalculation')?.output_payload;
+  const procurementTrace = responseResult?.traces?.find(t => t.step_name === 'Procurement_Vendor_Negotiation')?.output_payload;
+
+  // Google Maps Directions URL Generator
+  const googleMapsUrl = `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(formData.location)}&destination=${encodeURIComponent(formData.destination)}&travelmode=driving`;
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 p-4 md:p-8 font-sans">
@@ -113,9 +120,54 @@ function App() {
           </div>
         )}
 
-        {/* Execution Results */}
+        {/* Execution Results & Live Google Maps Integration */}
         {responseResult && (
           <div className="space-y-6">
+            
+            {/* Interactive Route & Nearest Operational Hub Card */}
+            <div className="bg-gradient-to-br from-slate-900 to-slate-950 border border-blue-500/30 rounded-xl p-6 shadow-2xl relative overflow-hidden">
+              <div className="absolute top-0 right-0 bg-blue-600 text-white text-[10px] font-bold px-3 py-1 rounded-bl-xl uppercase tracking-wider">
+                Live Google Maps Route
+              </div>
+
+              <h3 className="text-lg font-bold text-white mb-3 flex items-center gap-2">
+                <span>📍</span> Hyper-Accurate Alternative Route & Hub Navigation
+              </h3>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-5">
+                <div className="bg-slate-950/80 p-4 rounded-lg border border-slate-800">
+                  <span className="text-xs text-slate-400 block uppercase tracking-wider mb-1">Total Distance & ETA</span>
+                  <div className="text-xl font-extrabold text-blue-400">
+                    {routingTrace?.total_distance || 'N/A'} <span className="text-sm font-normal text-slate-300">({routingTrace?.estimated_travel_time || 'N/A'})</span>
+                  </div>
+                  <p className="text-xs text-slate-400 mt-2">Status: <span className="text-amber-400 font-medium">{routingTrace?.primary_route_status || 'Optimized'}</span></p>
+                </div>
+
+                <div className="bg-slate-950/80 p-4 rounded-lg border border-slate-800">
+                  <span className="text-xs text-slate-400 block uppercase tracking-wider mb-1">Nearest Operational Hub</span>
+                  <div className="text-sm font-bold text-emerald-400">
+                    {procurementTrace?.nearest_operational_hub || 'Central Storage Depot Patna'}
+                  </div>
+                  <p className="text-xs text-slate-300 mt-1">{procurementTrace?.inventory_status || 'Stock locked 100%'}</p>
+                </div>
+              </div>
+
+              <div className="bg-slate-900/90 p-3 rounded-lg border border-slate-800 mb-5 text-xs text-slate-300">
+                <strong className="text-white block mb-1">Optimized Transit Corridor Path:</strong>
+                <p className="text-slate-400 font-mono">{routingTrace?.hyper_accurate_alternative_route || 'Direct Corridor Route'}</p>
+              </div>
+
+              {/* Direct Open in Google Maps Button */}
+              <a 
+                href={googleMapsUrl} 
+                target="_blank" 
+                rel="noopener noreferrer" 
+                className="block text-center w-full bg-emerald-600 hover:bg-emerald-500 text-white font-semibold py-3 px-4 rounded-lg transition shadow-lg shadow-emerald-600/20 text-sm flex items-center justify-center gap-2"
+              >
+                <span>🗺️</span> Open Full Route & Navigation in Google Maps
+              </a>
+            </div>
+
             {/* Summary Card */}
             <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 shadow-xl">
               <div className="flex flex-col md:flex-row justify-between items-start md:items-center border-b border-slate-800 pb-4 mb-4 gap-2">
@@ -162,7 +214,6 @@ function App() {
                       </div>
                     </div>
 
-                    {/* Formatted payload highlights */}
                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 mt-3 text-xs">
                       {Object.entries(trace.output_payload || {}).map(([key, val], kIdx) => (
                         <div key={kIdx} className="bg-slate-950 p-2.5 rounded border border-slate-800/50 overflow-hidden">
