@@ -8,7 +8,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-app = FastAPI(title="Autonomous Enterprise Fleet Agentic AI & RAG Engine", version="4.0.0")
+app = FastAPI(title="Autonomous Enterprise Fleet Agentic AI & RAG Engine", version="4.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -279,6 +279,27 @@ async def get_approval_status(incident_id: str):
         "approval_status": current_status
     }
 
+def send_whatsapp_text_reply(to_phone: str, text: str):
+    """Helper function to send automated WhatsApp text back to the manager."""
+    token = os.getenv("WHATSAPP_TOKEN")
+    phone_id = os.getenv("PHONE_NUMBER_ID", "1340284595815318")
+    if not token or token == "YOUR_TOKEN":
+        return {"status": "simulated_reply_sent"}
+    
+    url = f"https://graph.facebook.com/v26.0/{phone_id}/messages"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+    body = {
+        "messaging_product": "whatsapp",
+        "to": to_phone,
+        "type": "text",
+        "text": {"body": text}
+    }
+    res = requests.post(url, json=body, headers=headers)
+    return {"status_code": res.status_code, "response": res.json() if res.content else {}}
+
 @app.post("/api/send-whatsapp-interactive")
 async def send_whatsapp_interactive(payload: dict):
     incident_id = payload.get("incident_id")
@@ -376,27 +397,35 @@ async def whatsapp_webhook(request: Request):
                 if "APPROVE_" in payload_id:
                     inc_id = payload_id.split("APPROVE_")[1]
                     APPROVAL_STATES[inc_id] = "APPROVED_AND_DISPATCHED"
+                    send_whatsapp_text_reply(sender_phone, "✅ Repair approved successfully! Mechanic & parts dispatch process initiated.")
                     return {"status": "success", "action": "Approved via button click."}
                 elif "REJECT_" in payload_id:
                     inc_id = payload_id.split("REJECT_")[1]
                     APPROVAL_STATES[inc_id] = "REJECTED_REROUTING"
+                    send_whatsapp_text_reply(sender_phone, "❌ Repair rejected. Initiating vehicle rerouting sequence.")
                     return {"status": "success", "action": "Rejected via button click."}
             
             # Case B: Conversational LLM Natural Language Text Response
             elif msg.get("type") == "text":
                 text_body = msg["text"].get("body", "").lower()
-                # Find active incident for this sender phone
                 for phone, inc_id in INCIDENT_CONTEXTS.items():
                     if phone in sender_phone or sender_phone in phone:
                         if "local" in text_body or "fatuha" in text_body or "sasta" in text_body or "bypass" in text_body:
                             APPROVAL_STATES[inc_id] = "APPROVED_LOCAL_MECHANIC_REROUTED"
+                            reply_msg = f"🔄 Natural Language Intent Parsed: Local mechanic / corridor instruction logged. System status updated to: APPROVED_LOCAL_MECHANIC_REROUTED"
                         elif "ok" in text_body or "haan" in text_body or "kardo" in text_body or "approve" in text_body:
                             APPROVAL_STATES[inc_id] = "APPROVED_AND_DISPATCHED"
+                            reply_msg = f"✅ Approved via text command! Dispatch sequence active."
                         elif "cancel" in text_body or "reject" in text_body or "mat" in text_body:
                             APPROVAL_STATES[inc_id] = "REJECTED_REROUTING"
+                            reply_msg = f"❌ Instruction received: Rerouting vehicle."
                         else:
                             APPROVAL_STATES[inc_id] = f"CUSTOM_INSTRUCTION_LOGGED: {text_body}"
-                        return {"status": "success", "action": "Natural language intent parsed by LLM agent."}
+                            reply_msg = f"📝 Custom instruction logged by LLM Agent: '{text_body}'. Fleet ERP updated."
+                        
+                        # Send automated WhatsApp reply back to manager
+                        send_whatsapp_text_reply(sender_phone, reply_msg)
+                        return {"status": "success", "action": "Natural language intent parsed and automated WhatsApp reply dispatched."}
     except Exception as e:
         return {"status": "error", "details": str(e)}
 
@@ -404,4 +433,4 @@ async def whatsapp_webhook(request: Request):
 
 @app.get("/api/health")
 async def health_check():
-    return {"status": "online", "engine": "Enterprise Agentic AI RAG & Swarm Orchestrator v4.0.0"}
+    return {"status": "online", "engine": "Enterprise Agentic AI RAG & Swarm Orchestrator v4.1.0"}
