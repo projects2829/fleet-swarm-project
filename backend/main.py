@@ -244,7 +244,6 @@ async def send_whatsapp_interactive(payload: dict):
     vehicle_id = payload.get("vehicle_id")
     hub = payload.get("hub")
 
-    # Clean phone number (removes '+' and spaces, keeping digits only)
     cleaned_phone = re.sub(r'\D', '', raw_phone)
 
     token = os.getenv("WHATSAPP_TOKEN")
@@ -267,8 +266,20 @@ async def send_whatsapp_interactive(payload: dict):
                 },
                 "action": {
                     "buttons": [
-                        {"type": "reply", "id": f"APPROVE_{incident_id}", "title": "Approve Repair ✅"},
-                        {"type": "reply", "id": f"REJECT_{incident_id}", "title": "Reject & Reroute ❌"}
+                        {
+                            "type": "reply",
+                            "reply": {
+                                "id": f"APPROVE_{incident_id}",
+                                "title": "Approve Repair ✅"
+                            }
+                        },
+                        {
+                            "type": "reply",
+                            "reply": {
+                                "id": f"REJECT_{incident_id}",
+                                "title": "Reject & Reroute ❌"
+                            }
+                        }
                     ]
                 }
             }
@@ -277,7 +288,6 @@ async def send_whatsapp_interactive(payload: dict):
         print("Meta API Response Status:", res.status_code)
         print("Meta API Response Body:", res.text)
         
-        # 🔥 FIX: Expose real Meta API error instead of masking it as success
         if res.status_code != 200:
             return {
                 "status": "meta_api_error",
