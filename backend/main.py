@@ -111,7 +111,7 @@ def call_ai_agent(manager_text: str, incident_ctx: dict) -> dict:
         f"- RAG Suggested Part: {incident_ctx.get('recommended_part')}\n\n"
         f"Manager's WhatsApp Message: \"{manager_text}\""
     )
-        try:
+    try:
         url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent"
         headers = {
             "x-goog-api-key": GEMINI_API_KEY,
