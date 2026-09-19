@@ -112,7 +112,11 @@ def call_ai_agent(manager_text: str, incident_ctx: dict) -> dict:
         f"Manager's WhatsApp Message: \"{manager_text}\""
     )
     try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key={GEMINI_API_KEY}"
+        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent"
+        headers = {
+            "x-goog-api-key": GEMINI_API_KEY,
+            "Content-Type": "application/json"
+        }
         payload = {
             "systemInstruction": {
                 "parts": [{"text": system_prompt}]
@@ -128,7 +132,7 @@ def call_ai_agent(manager_text: str, incident_ctx: dict) -> dict:
                 "response_mime_type": "application/json"
             }
         }
-        res = requests.post(url, json=payload, timeout=15)
+        res = requests.post(url, json=payload, headers=headers, timeout=15)
         res.raise_for_status()
         data = res.json()
 
