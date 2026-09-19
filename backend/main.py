@@ -111,28 +111,19 @@ def call_ai_agent(manager_text: str, incident_ctx: dict) -> dict:
         f"- RAG Suggested Part: {incident_ctx.get('recommended_part')}\n\n"
         f"Manager's WhatsApp Message: \"{manager_text}\""
     )
-    try:
+        try:
         url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent"
         headers = {
             "x-goog-api-key": GEMINI_API_KEY,
             "Content-Type": "application/json"
         }
         payload = {
-            "systemInstruction": {
-                "parts": [{"text": system_prompt}]
-            },
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": [{"text": user_prompt}]
-                }
-            ],
-            "generationConfig": {
-                "temperature": 0.3,
-                "response_mime_type": "application/json"
-            }
+            "systemInstruction": {"parts": [{"text": system_prompt}]},
+            "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
+            "generationConfig": {"temperature": 0.3, "response_mime_type": "application/json"}
         }
         res = requests.post(url, json=payload, headers=headers, timeout=15)
+        print(f"DEBUG GEMINI RAW RESPONSE ({res.status_code}): {res.text}")
         res.raise_for_status()
         data = res.json()
 
