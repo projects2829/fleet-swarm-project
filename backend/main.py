@@ -8,7 +8,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-app = FastAPI(title="Hyper-Local Fleet Swarm Intelligence Engine", version="3.8.0")
+app = FastAPI(title="Hyper-Local Fleet Swarm Intelligence Engine", version="3.8.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -32,6 +32,9 @@ APPROVAL_STATES = {}
 
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 WHATSAPP_PHONE_ID = os.getenv("WHATSAPP_PHONE_ID", "YOUR_PHONE_NUMBER_ID")
+
+# 🔑 Yeh wahi secret token hai jo aap Meta Dashboard ke 'Verify Token' mein dalenge
+VERIFY_TOKEN = "fleet_secret_token_2026"
 
 class IncidentInput(BaseModel):
     vehicle_id: str
@@ -173,7 +176,6 @@ class HyperLocalSwarmOrchestrator:
         clean_vid = self.incident.vehicle_id.strip().upper()
         assigned_phone = FLEET_WHATSAPP_MAPPING.get(clean_vid, "+916209313108")
 
-        # Initialize HITL approval state in memory
         APPROVAL_STATES[self.incident_id] = "PENDING_MANAGER_APPROVAL"
 
         # 1. Supervisor Agent
@@ -242,7 +244,6 @@ async def send_whatsapp_interactive(payload: dict):
     vehicle_id = payload.get("vehicle_id")
     hub = payload.get("hub")
 
-    # If Meta API Token is configured, dispatch real interactive buttons
     if WHATSAPP_TOKEN and WHATSAPP_TOKEN != "YOUR_TOKEN":
         url = f"https://graph.facebook.com/v17.0/{WHATSAPP_PHONE_ID}/messages"
         headers = {
@@ -269,18 +270,36 @@ async def send_whatsapp_interactive(payload: dict):
         res = requests.post(url, json=body, headers=headers)
         return {"status": "dispatched_via_meta_api", "response": res.json()}
     
-    # Fallback simulation response for testing UI
     return {
         "status": "simulated_interactive_dispatched",
         "message": f"WhatsApp interactive buttons sent successfully to {phone} for incident {incident_id}."
     }
 
-# Webhook listener for incoming WhatsApp button clicks
+# ==========================================
+# 1. WHATSAPP WEBHOOK VERIFICATION (GET) - Meta Dashboard Setup ke liye
+# ==========================================
+@app.get("/api/whatsapp-webhook")
+async def verify_whatsapp_webhook(request: Request):
+    hub_mode = request.query_params.get("hub.mode")
+    hub_challenge = request.query_params.get("hub.challenge")
+    hub_verify_token = request.query_params.get("hub.verify_token")
+    
+    if hub_mode == "subscribe" and hub_verify_token == VERIFY_TOKEN:
+        print("WhatsApp Webhook Verified Successfully!")
+        return int(hub_challenge)
+    
+    raise HTTPException(status_code=403, detail="Verification token mismatch")
+
+
+# ==========================================
+# 2. INCOMING BUTTON CLICK HANDLER (POST) - Webhook Listener
+# ==========================================
 @app.post("/api/whatsapp-webhook")
 async def whatsapp_webhook(request: Request):
-    data = await request.json()
     try:
-        # Parse Meta WhatsApp incoming interactive button reply structure
+        data = await request.json()
+        print("Incoming Webhook Payload:", data)
+        
         entry = data.get("entry", [{}])[0]
         changes = entry.get("changes", [{}])[0]
         value = changes.get("value", {})
@@ -307,4 +326,4 @@ async def whatsapp_webhook(request: Request):
 
 @app.get("/api/health")
 async def health_check():
-    return {"status": "online", "engine": "HITL Swarm Orchestrator v3.8.0"}
+    return {"status": "online", "engine": "HITL Swarm Orchestrator v3.8.1"}
