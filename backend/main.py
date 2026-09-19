@@ -8,7 +8,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-app = FastAPI(title="Hyper-Local Fleet Swarm Intelligence Engine", version="3.6.1")
+app = FastAPI(title="Hyper-Local Fleet Swarm Intelligence Engine", version="3.6.2")
 
 app.add_middleware(
     CORSMiddleware,
@@ -79,12 +79,14 @@ class HyperLocalSwarmOrchestrator:
         return None
 
     def _get_heavy_service_center_intelligence(self):
-        """Fetches authorized Tata CV and Eicher Service Centers with clean numbering"""
-        formatted_hubs = []
+        """Fetches authorized Tata CV & Eicher Service Centers and selects the closest one to breakdown point"""
+        raw_hubs = []
         
         if GOOGLE_MAPS_API_KEY:
             places_url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
-            query_str = f"Tata commercial vehicle service center OR Eicher workshop Patna"
+            # Extract main area/city keyword from location for precise local search
+            location_query = self.incident.location.split(",")[0].strip()
+            query_str = f"Tata commercial vehicle service center OR Eicher workshop near {location_query}, Patna"
             params = {
                 "query": query_str,
                 "key": GOOGLE_MAPS_API_KEY
@@ -97,33 +99,69 @@ class HyperLocalSwarmOrchestrator:
                         name = place.get('name', 'Service Center')
                         address = place.get('formatted_address', '')
                         rating = place.get('rating', 'N/A')
-                        formatted_hubs.append(f"{name} — {address} (Rating: {rating})")
+                        geometry = place.get('geometry', {}).get('location', {})
+                        raw_hubs.append({
+                            "display_str": f"{name} — {address} (Rating: {rating})",
+                            "coords": geometry
+                        })
             except Exception:
                 pass
 
-        # Robust Fallback / Supplement for Patna / Bihar corridor
-        default_heavy_hubs = [
-            "TATA.CARS Service Centre - Guinea Motors, Patliputra Industrial Area, Patna, Bihar (Rating: 3.9)",
-            "Eicher Commercial Vehicles Workshop, NH-30 Bypass Road, Patna, Bihar (Rating: 4.2)",
-            "Tata Motors Authorized Commercial Heavy Workshop, Zero Mile, Patna, Bihar (Rating: 4.1)",
-            "Eicher Trucks & Buses Service Station, Fatuha Industrial Area, Patna, Bihar (Rating: 4.0)"
-        ]
+        # Robust Fallback list for Patna corridor if API is empty
+        if not raw_hubs:
+            default_heavy_hubs = [
+                "TATA.CARS Service Centre - Guinea Motors, Patliputra Industrial Area, Patna, Bihar (Rating: 3.9)",
+                "Eicher Commercial Vehicles Workshop, NH-30 Bypass Road, Patna, Bihar (Rating: 4.2)",
+                "Tata Motors Authorized Commercial Heavy Workshop, Zero Mile, Patna, Bihar (Rating: 4.1)",
+                "Eicher Trucks & Buses Service Station, Fatuha Industrial Area, Patna, Bihar (Rating: 4.0)"
+            ]
+            for hub in default_heavy_hubs:
+                raw_hubs.append({"display_str": hub, "coords": {}})
 
-        for hub in default_heavy_hubs:
-            if not any(hub.split("—")[0].strip() in h for h in formatted_hubs):
-                formatted_hubs.append(hub)
+        # Calculate or pick the closest hub based on proximity
+        # If coordinates are available via Distance Matrix API, we pick the absolute closest; else take the first valid local result
+        closest_hub_str = raw_hubs[0]["display_str"]
+        
+        if GOOGLE_MAPS_API_KEY and len(raw_hubs) > 1 and raw_hubs[0]["coords"]:
+            destinations = "|".join([f"{h['coords'].get('lat')},{h['coords'].get('lng')}" for h in raw_hubs if h['coords']])
+            matrix_url = "https://maps.googleapis.com/maps/api/distancematrix/json"
+            matrix_params = {
+                "origins": self.incident.location,
+                "destinations": destinations,
+                "key": GOOGLE_MAPS_API_KEY
+            }
+            try:
+                m_res = requests.get(matrix_url, params=matrix_params, timeout=5)
+                m_data = m_res.json()
+                if m_data.get("status") == "OK":
+                    elements = m_data["rows"][0]["elements"]
+                    min_distance = float('inf')
+                    best_idx = 0
+                    for idx, elem in enumerate(elements):
+                        if elem.get("status") == "OK":
+                            dist_val = elem["distance"]["value"]
+                            if dist_val < min_distance:
+                                min_distance = dist_val
+                                best_idx = idx
+                    closest_hub_str = raw_hubs[best_idx]["display_str"]
+            except Exception:
+                pass
 
-        # Properly clean leading numbers using standard regex sub and create numbered list
-        numbered_hubs = []
-        for idx, hub in enumerate(formatted_hubs[:5], 1):
-            clean_hub = re.sub(r'^\d+\.\s*', '', hub)
-            numbered_hubs.append(f"{idx}. {clean_hub}")
+        # Format numbered list (1 to N), ensuring the closest hub is placed at #1
+        cleaned_raw_strings = [re.sub(r'^\d+\.\s*', '', h["display_str"]) for h in raw_hubs]
+        
+        # Bring closest hub to the top if present
+        cleaned_closest = re.sub(r'^\d+\.\s*', '', closest_hub_str)
+        if cleaned_closest in cleaned_raw_strings:
+            cleaned_raw_strings.remove(cleaned_closest)
+        cleaned_raw_strings.insert(0, cleaned_closest)
 
-        primary_hub = numbered_hubs[0] if numbered_hubs else "1. Authorized Tata CV & Eicher Service Hub, Patna"
+        numbered_hubs = [f"{idx}. {hub}" for idx, hub in enumerate(cleaned_raw_strings[:5], 1)]
+        primary_hub = numbered_hubs[0]
 
         return {
             "corridor": self.incident.location,
-            "alt_route": f"Multi-Hub Heavy Corridor linking {self.incident.location} to authorized workshops",
+            "alt_route": f"Proximity-Optimized Heavy Corridor linking {self.incident.location} to {primary_hub.split('—')[0]}",
             "hub": primary_hub,
             "all_detected_hubs": numbered_hubs,
             "delay_saved": 4.0
@@ -157,7 +195,7 @@ class HyperLocalSwarmOrchestrator:
             "total_distance": map_route["distance_text"] if map_route else "310 km",
             "estimated_travel_time": map_route["duration_text"] if map_route else "6 hours",
             "primary_route_status": "HEAVY_TRAFFIC_OR_CONGESTED",
-            "hyper_accurate_alternative_route": f"Optimized heavy transit from {self.incident.location} to verified service nodes",
+            "hyper_accurate_alternative_route": f"Optimized proximity transit from {self.incident.location} to nearest verified workshop: {service_intel['hub'].split('—')[0]}",
             "start_coordinates": map_route["start_coords"] if map_route else {"lat": 25.6, "lng": 85.1},
             "end_coordinates": map_route["end_coords"] if map_route else {"lat": 25.5, "lng": 87.5}
         }
@@ -210,7 +248,7 @@ class HyperLocalSwarmOrchestrator:
                 "origin": self.incident.location,
                 "destination": service_intel["hub"],
                 "all_available_service_centers": detected_hubs,
-                "mitigation_summary": f"Swarm rerouted heavy unit {self.incident.vehicle_id} from {self.incident.location} to repair workshop options.",
+                "mitigation_summary": f"Swarm rerouted heavy unit {self.incident.vehicle_id} from {self.incident.location} to the closest repair workshop: {service_intel['hub']}.",
                 "erp_ref": erp["erp_transaction_id"]
             }
         )
@@ -221,4 +259,4 @@ async def trigger_triage(incident: IncidentInput):
 
 @app.get("/api/health")
 async def health_check():
-    return {"status": "online", "engine": "Fleet Swarm Intelligence Multi-Hub Engine v3.6.1"}
+    return {"status": "online", "engine": "Fleet Swarm Intelligence Proximity Engine v3.6.2"}
