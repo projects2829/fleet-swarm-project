@@ -81,7 +81,13 @@ function App() {
   const nearestHub = supervisorTrace?.destination_workshop || 'Authorized Service Hub';
   const allNearbyHubs = supervisorTrace?.all_nearby_service_centers || [];
 
-  const googleMapsRouteUrl = `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(formData.location)}&destination=${encodeURIComponent(formData.destination)}&waypoints=${encodeURIComponent(nearestHub)}&travelmode=driving`;
+    const searchScope = responseResult?.final_resolution?.service_center_search_scope;
+
+  const googleMapsRouteUrl =
+    responseResult?.final_resolution?.open_full_route_url ||
+    `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(formData.location)}&destination=${encodeURIComponent(formData.destination)}&waypoints=${encodeURIComponent(
+      nearestHub.replace(/^\d+\.\s*/, '').replace(/\s*\(Rating:.*?\)\s*$/, '')
+    )}&travelmode=driving`;
   const googleMapsHubPinUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(nearestHub)}`;
 
   const handleTriggerInteractiveApproval = async () => {
