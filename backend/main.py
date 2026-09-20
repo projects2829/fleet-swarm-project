@@ -229,6 +229,28 @@ class TriageResponse(BaseModel):
     final_resolution: Dict[str, Any]
 
 
+def _resolve_hub_phone(hub_record: dict) -> str:
+    """Static phone (fallback hubs) ya Google Place Details se phone nikaalta hai —
+    kisi bhi hub_record ke liye reusable, sirf primary hub tak limited nahi."""
+    if hub_record.get("phone"):
+        return hub_record["phone"]
+    if hub_record.get("place_id") and GOOGLE_MAPS_API_KEY:
+        try:
+            details_url = "https://maps.googleapis.com/maps/api/place/details/json"
+            details_params = {
+                "place_id": hub_record["place_id"],
+                "fields": "formatted_phone_number,international_phone_number",
+                "key": GOOGLE_MAPS_API_KEY
+            }
+            d_data = requests.get(details_url, params=details_params, timeout=5).json()
+            phone = d_data.get("result", {}).get("formatted_phone_number") or d_data.get("result", {}).get("international_phone_number")
+            if phone:
+                return phone
+        except Exception:
+            pass
+    return "Contact number not available — team will call and share shortly"
+
+
 def send_whatsapp_text_reply(to_phone: str, text: str):
     """Sends a plain text reply back on WhatsApp with automatic fallback simulation."""
     if not WHATSAPP_TOKEN or WHATSAPP_TOKEN == "YOUR_TOKEN":
@@ -545,37 +567,32 @@ class EnterpriseAgenticRAGOrchestrator:
                 key=lambda h: self._haversine_km(origin_coords, h["coords"]) if h.get("coords") else float("inf")
             )
 
+        # Ensure de-duplication and closest-first ordering are consistent,
+        # then keep this exact order as the "queue" reject/reroute walks through.
+        seen_display = set()
+        deduped_hubs = []
+        for h in raw_hubs:
+            if h["display_str"] not in seen_display:
+                seen_display.add(h["display_str"])
+                deduped_hubs.append(h)
+        raw_hubs = deduped_hubs[:5]
+
         closest_hub_str = raw_hubs[0]["display_str"]
         hub_waypoint = raw_hubs[0].get("waypoint")
-        hub_phone = "Contact number not available — team will call and share shortly"
+        hub_phone = _resolve_hub_phone(raw_hubs[0])
 
-        for h in raw_hubs:
-            if h["display_str"] == closest_hub_str:
-                if h.get("phone"):
-                    hub_phone = h["phone"]
-                elif h.get("place_id") and GOOGLE_MAPS_API_KEY:
-                    try:
-                        details_url = "https://maps.googleapis.com/maps/api/place/details/json"
-                        details_params = {
-                            "place_id": h["place_id"],
-                            "fields": "formatted_phone_number,international_phone_number",
-                            "key": GOOGLE_MAPS_API_KEY
-                        }
-                        d_data = requests.get(details_url, params=details_params, timeout=5).json()
-                        phone = d_data.get("result", {}).get("formatted_phone_number") or d_data.get("result", {}).get("international_phone_number")
-                        if phone:
-                            hub_phone = phone
-                    except Exception:
-                        pass
-                break
-
-        cleaned_raw_strings = [re.sub(r'^\d+\.\s*', '', h["display_str"]) for h in raw_hubs]
-        cleaned_closest = re.sub(r'^\d+\.\s*', '', closest_hub_str)
-        if cleaned_closest in cleaned_raw_strings:
-            cleaned_raw_strings.remove(cleaned_closest)
-        cleaned_raw_strings.insert(0, cleaned_closest)
-
-        numbered_hubs = [f"{idx}. {hub}" for idx, hub in enumerate(cleaned_raw_strings[:5], 1)]
+        numbered_hubs = [f"{idx}. {h['display_str']}" for idx, h in enumerate(raw_hubs, 1)]
+        # Full ordered record list (closest first) — kept per-incident so that
+        # a manager REJECT can automatically advance to the next one in line.
+        hub_records = [
+            {
+                "name": h["display_str"],
+                "phone": h.get("phone"),
+                "place_id": h.get("place_id"),
+                "waypoint": h.get("waypoint"),
+            }
+            for h in raw_hubs
+        ]
         primary_hub = numbered_hubs[0]
 
         return {
@@ -584,7 +601,8 @@ class EnterpriseAgenticRAGOrchestrator:
             "hub_phone": hub_phone,
             "hub_waypoint": hub_waypoint,
             "search_scope": "STATEWIDE_BIHAR" if is_outside_patna else "PATNA_METRO",
-            "all_detected_hubs": numbered_hubs
+            "all_detected_hubs": numbered_hubs,
+            "hub_records": hub_records
         }
 
     @traced("run_swarm_full_incident")
@@ -612,8 +630,15 @@ class EnterpriseAgenticRAGOrchestrator:
         INCIDENT_DETAILS[self.incident_id] = {
             "vehicle_id": self.incident.vehicle_id,
             "issue_type": self.incident.issue_type,
+            "location": self.incident.location,
+            "destination": self.incident.destination,
+            "severity": self.incident.severity,
+            "cargo_type": self.incident.cargo_type,
             "hub": service_intel["hub"],
             "hub_phone": service_intel["hub_phone"],
+            "hub_waypoint": service_intel.get("hub_waypoint"),
+            "hub_records": service_intel.get("hub_records", []),
+            "hub_index": 0,
             "recommended_part": rag_intel["recommended_part"]
         }
 
@@ -706,20 +731,12 @@ async def get_approval_status(incident_id: str):
         "approval_status": current_status
     }
 
-@app.post("/api/send-whatsapp-interactive")
-async def send_whatsapp_interactive(payload: dict):
-    incident_id = payload.get("incident_id")
-    raw_phone = payload.get("phone", "")
-    vehicle_id = payload.get("vehicle_id")
-    hub = payload.get("hub")
-    
-    location = payload.get("location", "N/A")
-    issue_type = payload.get("issue_type", "N/A")
-    severity = payload.get("severity", "N/A")
-    cargo_type = payload.get("cargo_type", "N/A")
-    recommended_part = payload.get("recommended_part", "Standard Spare Kit")
-
-    cleaned_phone = re.sub(r'\D', '', raw_phone)
+def send_whatsapp_interactive_approval(incident_id: str, to_phone: str, vehicle_id: str, hub: str,
+                                        location: str, issue_type: str, severity: str,
+                                        cargo_type: str, recommended_part: str):
+    """Approve/Reject interactive button bhejta hai — initial manager alert aur
+    har automatic reject-reroute cycle, dono isi ek function se guzarte hain."""
+    cleaned_phone = re.sub(r'\D', '', to_phone or "")
     token = WHATSAPP_TOKEN
     phone_id = WHATSAPP_PHONE_ID
 
@@ -771,8 +788,34 @@ async def send_whatsapp_interactive(payload: dict):
         if res.status_code != 200:
             return {"status": "meta_api_error", "status_code": res.status_code, "error_details": res.json()}
         return {"status": "dispatched_via_meta_api", "response": res.json()}
-    
+
     return {"status": "simulated_interactive_dispatched", "message": f"Google-level Agentic WhatsApp alert sent to {cleaned_phone}."}
+
+
+@app.post("/api/send-whatsapp-interactive")
+async def send_whatsapp_interactive(payload: dict):
+    incident_id = payload.get("incident_id")
+    raw_phone = payload.get("phone", "")
+    vehicle_id = payload.get("vehicle_id")
+    hub = payload.get("hub")
+
+    location = payload.get("location", "N/A")
+    issue_type = payload.get("issue_type", "N/A")
+    severity = payload.get("severity", "N/A")
+    cargo_type = payload.get("cargo_type", "N/A")
+    recommended_part = payload.get("recommended_part", "Standard Spare Kit")
+
+    return send_whatsapp_interactive_approval(
+        incident_id=incident_id,
+        to_phone=raw_phone,
+        vehicle_id=vehicle_id,
+        hub=hub,
+        location=location,
+        issue_type=issue_type,
+        severity=severity,
+        cargo_type=cargo_type,
+        recommended_part=recommended_part
+    )
 
 @app.get("/api/whatsapp-webhook")
 async def verify_whatsapp_webhook(request: Request):
@@ -834,9 +877,55 @@ async def whatsapp_webhook(request: Request):
 
                 elif "REJECT_" in payload_id:
                     inc_id = payload_id.split("REJECT_")[1]
-                    APPROVAL_STATES[inc_id] = "REJECTED_REROUTING"
-                    send_whatsapp_text_reply(raw_sender_phone, "❌ Repair rejected — vehicle rerouting has been initiated.")
-                    return {"status": "success", "action": "Rejected via button click."}
+                    incident_ctx = INCIDENT_DETAILS.get(inc_id, {})
+                    hub_records = incident_ctx.get("hub_records", [])
+                    current_index = incident_ctx.get("hub_index", 0)
+                    next_index = current_index + 1
+
+                    if next_index < len(hub_records):
+                        # Auto-advance to the next nearest detected hub and
+                        # re-open the HITL approval gate for it — this repeats
+                        # every time the manager rejects, until hubs run out.
+                        next_hub_record = hub_records[next_index]
+                        next_hub_phone = _resolve_hub_phone(next_hub_record)
+
+                        incident_ctx["hub"] = next_hub_record["name"]
+                        incident_ctx["hub_phone"] = next_hub_phone
+                        incident_ctx["hub_waypoint"] = next_hub_record.get("waypoint")
+                        incident_ctx["hub_index"] = next_index
+                        INCIDENT_DETAILS[inc_id] = incident_ctx
+                        APPROVAL_STATES[inc_id] = "PENDING_MANAGER_APPROVAL"
+
+                        send_whatsapp_text_reply(
+                            raw_sender_phone,
+                            f"❌ Rejected. 🔄 Auto-rerouting to next nearest service center "
+                            f"({next_index + 1}/{len(hub_records)})..."
+                        )
+                        send_whatsapp_interactive_approval(
+                            incident_id=inc_id,
+                            to_phone=raw_sender_phone,
+                            vehicle_id=incident_ctx.get("vehicle_id", ""),
+                            hub=next_hub_record["name"],
+                            location=incident_ctx.get("location", "N/A"),
+                            issue_type=incident_ctx.get("issue_type", "N/A"),
+                            severity=incident_ctx.get("severity", "N/A"),
+                            cargo_type=incident_ctx.get("cargo_type", "N/A"),
+                            recommended_part=incident_ctx.get("recommended_part", "Standard Spare Kit")
+                        )
+                        return {
+                            "status": "success",
+                            "action": f"Auto-rerouted to next hub ({next_index + 1}/{len(hub_records)}).",
+                            "new_hub": next_hub_record["name"]
+                        }
+                    else:
+                        # Hub list exhausted — nothing left to auto-reroute to.
+                        APPROVAL_STATES[inc_id] = "REJECTED_REROUTING"
+                        send_whatsapp_text_reply(
+                            raw_sender_phone,
+                            "❌ Rejected — no more nearby authorized service centers were found in range. "
+                            "Please advise manually or expand the search area."
+                        )
+                        return {"status": "success", "action": "Rejected — hub list exhausted, manual intervention needed."}
             
             elif msg.get("type") == "text":
                 text_body = msg["text"].get("body", "")
