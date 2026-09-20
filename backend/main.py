@@ -391,8 +391,8 @@ class EnterpriseAgenticRAGOrchestrator:
             return "Vision Agent inspected attachment: Heavy leakage identified on coolant line manifold. Auto-adjusted part diagnostics confidence."
         return "Vision Agent check: Standard text telemetry verified (no damage photo provided)."
 
-        def _geocode_location(self, address: str):
-        """Breakdown location ka lat/lng — nearest hub sorting ke liye."""
+            def _geocode_location(self, address: str):
+        """Breakdown location ka lat/lng nikaalta hai, nearest hub sorting ke liye."""
         if not GOOGLE_MAPS_API_KEY or not address:
             return None
         try:
@@ -407,7 +407,7 @@ class EnterpriseAgenticRAGOrchestrator:
 
     @staticmethod
     def _haversine_km(a, b):
-        """Do coords ke beech straight-line distance (km)."""
+        """Do coords ke beech straight-line distance nikaalta hai (km me)."""
         try:
             from math import radians, sin, cos, asin, sqrt
             lat1, lon1 = radians(a["lat"]), radians(a["lng"])
