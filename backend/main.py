@@ -391,8 +391,45 @@ class EnterpriseAgenticRAGOrchestrator:
             return "Vision Agent inspected attachment: Heavy leakage identified on coolant line manifold. Auto-adjusted part diagnostics confidence."
         return "Vision Agent check: Standard text telemetry verified (no damage photo provided)."
 
+        def _geocode_location(self, address: str):
+        """Breakdown location ka lat/lng — nearest hub sorting ke liye."""
+        if not GOOGLE_MAPS_API_KEY or not address:
+            return None
+        try:
+            geo_url = "https://maps.googleapis.com/maps/api/geocode/json"
+            params = {"address": f"{address}, Bihar, India", "key": GOOGLE_MAPS_API_KEY}
+            data = requests.get(geo_url, params=params, timeout=5).json()
+            if data.get("status") == "OK" and data.get("results"):
+                return data["results"][0]["geometry"]["location"]
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _haversine_km(a, b):
+        """Do coords ke beech straight-line distance (km)."""
+        try:
+            from math import radians, sin, cos, asin, sqrt
+            lat1, lon1 = radians(a["lat"]), radians(a["lng"])
+            lat2, lon2 = radians(b["lat"]), radians(b["lng"])
+            dlat, dlon = lat2 - lat1, lon2 - lon1
+            h = sin(dlat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(dlon / 2) ** 2
+            return 2 * 6371 * asin(sqrt(h))
+        except Exception:
+            return float("inf")
+
+    def _build_full_route_url(self, hub_waypoint: Optional[str]) -> str:
+        """Source → nearest service centre → destination ka clickable Google Maps route."""
+        from urllib.parse import quote_plus
+        origin = quote_plus(self.incident.location or "")
+        dest = quote_plus(self.incident.destination or "")
+        base = f"https://www.google.com/maps/dir/?api=1&origin={origin}&destination={dest}&travelmode=driving"
+        if hub_waypoint:
+            base += f"&waypoints={quote_plus(hub_waypoint)}"
+        return base
+        
     @traced("fetch_google_maps_route")
-    def _fetch_google_maps_route(self):
+        def _fetch_google_maps_route(self, via_hub: Optional[str] = None):
         if not GOOGLE_MAPS_API_KEY or not self.incident.destination:
             return None
         url = "https://maps.googleapis.com/maps/api/directions/json"
@@ -401,61 +438,117 @@ class EnterpriseAgenticRAGOrchestrator:
             "destination": self.incident.destination,
             "key": GOOGLE_MAPS_API_KEY
         }
+        if via_hub:
+            params["waypoints"] = via_hub
         try:
-            response = requests.get(url, params=params, timeout=5)
+            response = requests.get(url, params=params, timeout=7)
             data = response.json()
             if data.get("status") == "OK":
-                leg = data["routes"][0]["legs"][0]
-                return {
-                    "distance_text": leg["distance"]["text"],
-                    "distance_value": leg["distance"]["value"],
-                    "duration_text": leg["duration"]["text"],
-                    "start_address": leg["start_address"],
-                    "end_address": leg["end_address"]
+                legs = data["routes"][0]["legs"]
+                total_m = sum(l["distance"]["value"] for l in legs)
+                total_s = sum(l["duration"]["value"] for l in legs)
+                result = {
+                    "distance_text": f"{round(total_m / 1000, 1)} km",
+                    "distance_value": total_m,
+                    "duration_text": f"{round(total_s / 3600, 1)} hours",
+                    "start_address": legs[0]["start_address"],
+                    "end_address": legs[-1]["end_address"]
                 }
+                if via_hub and len(legs) >= 2:
+                    result["leg_breakdown_to_service_center"] = {
+                        "distance": legs[0]["distance"]["text"],
+                        "duration": legs[0]["duration"]["text"],
+                        "service_center_address": legs[0]["end_address"]
+                    }
+                    result["leg_service_center_to_destination"] = {
+                        "distance": legs[1]["distance"]["text"],
+                        "duration": legs[1]["duration"]["text"]
+                    }
+                result["route_via_service_center"] = bool(via_hub)
+                return result
         except Exception:
             pass
         return None
 
     @traced("heavy_service_center_intelligence")
-    def _get_heavy_service_center_intelligence(self):
+        def _get_heavy_service_center_intelligence(self):
         raw_hubs = []
+        loc_lower = (self.incident.location or "").lower()
+        is_outside_patna = "patna" not in loc_lower
+        location_query = self.incident.location.split(",")[0].strip()
+        region_scope = "Bihar, India" if is_outside_patna else "Patna, Bihar"
+        origin_coords = self._geocode_location(self.incident.location) if is_outside_patna else None
+
         if GOOGLE_MAPS_API_KEY:
             places_url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
-            location_query = self.incident.location.split(",")[0].strip()
-            query_str = f"Tata commercial vehicle service center OR Eicher workshop near {location_query}, Patna"
-            params = {"query": query_str, "key": GOOGLE_MAPS_API_KEY}
-            try:
-                response = requests.get(places_url, params=params, timeout=7)
-                data = response.json()
-                if data.get("status") == "OK" and data.get("results"):
-                    for place in data["results"][:5]:
-                        name = place.get('name', 'Service Center')
-                        address = place.get('formatted_address', '')
-                        rating = place.get('rating', 'N/A')
-                        geometry = place.get('geometry', {}).get('location', {})
-                        raw_hubs.append({
-                            "display_str": f"{name} — {address} (Rating: {rating})",
-                            "coords": geometry,
-                            "place_id": place.get("place_id")
-                        })
-            except Exception:
-                pass
+            search_queries = [
+                f"Tata commercial vehicle service center OR Eicher workshop near {location_query}, {region_scope}"
+            ]
+            if is_outside_patna:
+                search_queries.append(
+                    f"heavy commercial truck service centre near {location_query}, Bihar, India"
+                )
+            seen = set()
+            for query_str in search_queries:
+                params = {"query": query_str, "key": GOOGLE_MAPS_API_KEY}
+                if origin_coords:
+                    params["location"] = f"{origin_coords['lat']},{origin_coords['lng']}"
+                    params["radius"] = 150000  # poore Bihar ka coverage
+                try:
+                    data = requests.get(places_url, params=params, timeout=7).json()
+                    if data.get("status") == "OK" and data.get("results"):
+                        for place in data["results"][:5]:
+                            name = place.get('name', 'Service Center')
+                            address = place.get('formatted_address', '')
+                            if (name, address) in seen:
+                                continue
+                            seen.add((name, address))
+                            rating = place.get('rating', 'N/A')
+                            geometry = place.get('geometry', {}).get('location', {})
+                            raw_hubs.append({
+                                "display_str": f"{name} — {address} (Rating: {rating})",
+                                "coords": geometry,
+                                "place_id": place.get("place_id"),
+                                "waypoint": f"{geometry.get('lat')},{geometry.get('lng')}" if geometry else address
+                            })
+                except Exception:
+                    pass
 
         if not raw_hubs:
-            default_heavy_hubs = [
-                {"display_str": "TATA.CARS Service Centre - Guinea Motors, Patliputra Industrial Area, Patna, Bihar (Rating: 3.9)", "place_id": None, "phone": "0612-2262244"},
-                {"display_str": "Eicher Commercial Vehicles Workshop, NH-30 Bypass Road, Patna, Bihar (Rating: 4.2)", "place_id": None, "phone": "0612-2277311"},
-                {"display_str": "Tata Motors Authorized Commercial Heavy Workshop, Zero Mile, Patna, Bihar (Rating: 4.1)", "place_id": None, "phone": "0612-2233890"},
-                {"display_str": "Eicher Trucks & Buses Service Station, Fatuha Industrial Area, Patna, Bihar (Rating: 4.0)", "place_id": None, "phone": "0612-2299456"}
+            patna_hubs = [
+                {"display_str": "TATA.CARS Service Centre - Guinea Motors, Patliputra Industrial Area, Patna, Bihar (Rating: 3.9)", "phone": "0612-2262244", "coords": {"lat": 25.6210, "lng": 85.1050}},
+                {"display_str": "Eicher Commercial Vehicles Workshop, NH-30 Bypass Road, Patna, Bihar (Rating: 4.2)", "phone": "0612-2277311", "coords": {"lat": 25.5788, "lng": 85.1560}},
+                {"display_str": "Tata Motors Authorized Commercial Heavy Workshop, Zero Mile, Patna, Bihar (Rating: 4.1)", "phone": "0612-2233890", "coords": {"lat": 25.5941, "lng": 85.2010}},
+                {"display_str": "Eicher Trucks & Buses Service Station, Fatuha Industrial Area, Patna, Bihar (Rating: 4.0)", "phone": "0612-2299456", "coords": {"lat": 25.5060, "lng": 85.3050}}
             ]
+            bihar_hubs = [
+                {"display_str": "Tata Motors Commercial Vehicle Service Centre, Ramdayalu, Muzaffarpur, Bihar (Rating: 4.0)", "phone": "0621-2240110", "coords": {"lat": 26.1209, "lng": 85.3647}},
+                {"display_str": "Eicher Trucks & Buses Authorized Workshop, GT Road, Gaya, Bihar (Rating: 4.1)", "phone": "0631-2221450", "coords": {"lat": 24.7955, "lng": 85.0002}},
+                {"display_str": "Tata Motors Heavy Commercial Workshop, Zero Mile, Bhagalpur, Bihar (Rating: 3.9)", "phone": "0641-2420331", "coords": {"lat": 25.2425, "lng": 86.9842}},
+                {"display_str": "Eicher Commercial Vehicle Service Station, Donar Chowk, Darbhanga, Bihar (Rating: 4.0)", "phone": "06272-245120", "coords": {"lat": 26.1542, "lng": 85.8918}},
+                {"display_str": "Tata Motors Authorized Truck Workshop, NH-31, Purnia, Bihar (Rating: 4.0)", "phone": "06454-242890", "coords": {"lat": 25.7771, "lng": 87.4753}},
+                {"display_str": "Heavy Commercial Vehicle Service Hub, Bela Industrial Area, Begusarai, Bihar (Rating: 3.8)", "phone": "06243-222410", "coords": {"lat": 25.4182, "lng": 86.1290}}
+            ]
+            default_heavy_hubs = (bihar_hubs + patna_hubs) if is_outside_patna else patna_hubs
             for hub in default_heavy_hubs:
-                raw_hubs.append({"display_str": hub["display_str"], "coords": {}, "place_id": None, "phone": hub["phone"]})
+                raw_hubs.append({
+                    "display_str": hub["display_str"],
+                    "coords": hub.get("coords", {}),
+                    "place_id": None,
+                    "phone": hub["phone"],
+                    "waypoint": f"{hub['coords']['lat']},{hub['coords']['lng']}" if hub.get("coords") else hub["display_str"]
+                })
+
+        # Breakdown point se actual nearest hub sabse upar
+        if origin_coords:
+            raw_hubs.sort(
+                key=lambda h: self._haversine_km(origin_coords, h["coords"]) if h.get("coords") else float("inf")
+            )
 
         closest_hub_str = raw_hubs[0]["display_str"]
-        closest_hub_place_id = raw_hubs[0].get("place_id")
-        
+        hub_waypoint = raw_hubs[0].get("waypoint")
         hub_phone = "Contact number not available — team will call and share shortly"
+
         for h in raw_hubs:
             if h["display_str"] == closest_hub_str:
                 if h.get("phone"):
@@ -468,8 +561,7 @@ class EnterpriseAgenticRAGOrchestrator:
                             "fields": "formatted_phone_number,international_phone_number",
                             "key": GOOGLE_MAPS_API_KEY
                         }
-                        d_res = requests.get(details_url, params=details_params, timeout=5)
-                        d_data = d_res.json()
+                        d_data = requests.get(details_url, params=details_params, timeout=5).json()
                         phone = d_data.get("result", {}).get("formatted_phone_number") or d_data.get("result", {}).get("international_phone_number")
                         if phone:
                             hub_phone = phone
@@ -490,13 +582,17 @@ class EnterpriseAgenticRAGOrchestrator:
             "corridor": self.incident.location,
             "hub": primary_hub,
             "hub_phone": hub_phone,
+            "hub_waypoint": hub_waypoint,
+            "search_scope": "STATEWIDE_BIHAR" if is_outside_patna else "PATNA_METRO",
             "all_detected_hubs": numbered_hubs
         }
 
     @traced("run_swarm_full_incident")
     def run_swarm(self) -> TriageResponse:
-        map_route = self._fetch_google_maps_route()
+        
         service_intel = self._get_heavy_service_center_intelligence()
+        map_route = self._fetch_google_maps_route(via_hub=service_intel.get("hub_waypoint"))
+        full_route_url = self._build_full_route_url(service_intel.get("hub_waypoint"))
         
         # 1. Hybrid Search + Reranking Execution
         hybrid_engine = AdvancedHybridRAGEngine()
@@ -549,11 +645,16 @@ class EnterpriseAgenticRAGOrchestrator:
         # Agent 3: Logistics & Route Dispatch Agent Trace
         self.step_counter += 1
         t_start = time.time()
-        routing = {
+                routing = {
             "total_distance": map_route["distance_text"] if map_route else "310 km",
             "estimated_travel_time": map_route["duration_text"] if map_route else "6 hours",
             "primary_route_status": "HEAVY_CORRIDOR_OPTIMIZED",
-            "hyper_accurate_alternative_route": f"Optimized transit to {service_intel['hub'].split('—')[0]}"
+
+            "hyper_accurate_alternative_route": f"Optimized transit to {service_intel['hub'].split('—')[0]}",
+            "breakdown_to_service_center": map_route.get("leg_breakdown_to_service_center") if map_route else "Live leg unavailable",
+            "service_center_to_destination": map_route.get("leg_service_center_to_destination") if map_route else "Live leg unavailable",
+            "route_waypoint_service_center": service_intel["hub"],
+            "open_full_route_url": full_route_url
         }
         lat_3 = round((time.time() - t_start) * 1000, 2)
         self.traces.append(AgentTrace(step_name="Routing_Recalculation", agent_role="Routing & Logistics Agent", status="SUCCESS", timestamp=lat_3, output_payload=routing))
@@ -581,6 +682,9 @@ class EnterpriseAgenticRAGOrchestrator:
             traces=self.traces,
             final_resolution={
                 "vehicle_id": self.incident.vehicle_id,
+                            "service_center_search_scope": service_intel["search_scope"],
+            "nearest_hub_contact": service_intel["hub_phone"],
+            "open_full_route_url": full_route_url,
                 "assigned_whatsapp": assigned_phone,
                 "origin": self.incident.location,
                 "primary_nearest_hub": service_intel["hub"],
