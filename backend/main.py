@@ -215,6 +215,48 @@ class AdvancedHybridRAGEngine:
         }
 
 
+def _generate_ai_diagnosis(issue_type: str) -> Optional[Dict[str, str]]:
+    """Jab koi bhi hardcoded manual/keyword se match nahi hota, Gemini se
+    best-effort real diagnosis generate karta hai — taaki RAG sirf fixed
+    knowledge-base categories tak limited na rahe aur kisi bhi real-world
+    breakdown query ka genuine jawab de sake. Result hamesha caller ke
+    through 'AI-generated, verify manually' ke taur pe flag hota hai —
+    kabhi bhi certified-manual jitna confident nahi dikhaya jaata."""
+    if not GEMINI_API_KEY:
+        return None
+    try:
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            f"gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+        )
+        prompt = (
+            "You are a heavy commercial vehicle (truck/bus) diagnostic assistant "
+            "for an Indian fleet operator. A driver reported this breakdown issue:\n\n"
+            f"\"{issue_type}\"\n\n"
+            "Respond ONLY with strict JSON, no markdown fences, no preamble, in this "
+            "exact shape:\n"
+            '{"diagnostic_summary": "<one sentence likely cause>", '
+            '"recommended_part": "<short generic part or kit name>"}'
+        )
+        body = {"contents": [{"parts": [{"text": prompt}]}]}
+        resp = requests.post(url, json=body, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        raw_text = data["candidates"][0]["content"]["parts"][0]["text"]
+        cleaned = raw_text.strip().strip("`")
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:].strip()
+        parsed = json.loads(cleaned)
+        if parsed.get("diagnostic_summary") and parsed.get("recommended_part"):
+            return {
+                "diagnostic_summary": parsed["diagnostic_summary"],
+                "recommended_part": parsed["recommended_part"],
+            }
+    except Exception as e:
+        print(f"DEBUG AI DIAGNOSIS FALLBACK ERROR: {str(e)}")
+    return None
+
+
 # ==========================================
 # 3. SELF-RAG & CORRECTIVE RAG (CRAG) WITH HALLUCINATION GRADER
 # ==========================================
@@ -238,23 +280,37 @@ class CorrectiveRAGValidator:
 
         confidence = rag_output.get("cross_encoder_rerank_confidence", 0.9)
         if not hallucination_check["grounded"] or confidence < 0.75:
-            # Corrective RAG Trigger: fallback to safe standard heavy kit.
-            # Every displayed field is overwritten together here — leaving
-            # the old manual/content behind while only swapping the part
-            # code produced a nonsensical mixed result (e.g. "Tata Prima
-            # coolant manual" + "generic repair kit" + "radiator choke"
-            # content, none of which belong together).
-            rag_output["recommended_part"] = "Standard Certified Heavy Fleet Repair Kit (Part #FL-GEN-01)"
-            rag_output["referenced_manual"] = "No specific manual matched — generic fleet diagnostic applied"
-            rag_output["diagnostic_summary"] = (
-                "No confident match found in the knowledge base for this issue type. "
-                "A generic repair kit has been dispatched pending manual inspection."
-            )
-            rag_output["vector_match_score"] = 0.0
-            rag_output["bm25_keyword_score"] = 0.0
-            rag_output["cross_encoder_rerank_confidence"] = 0.0
-            rag_output["crag_intervention_triggered"] = True
-            rag_output["hallucination_grade"] = "CORRECTED_TO_SAFE_BASELINE"
+            # Corrective RAG Trigger: knowledge base has no confident match.
+            # Try a real, best-effort AI diagnosis (Gemini) FIRST so genuinely
+            # any breakdown query gets a real answer, not just the fixed
+            # manual categories — clearly flagged as AI-generated, never
+            # shown with certified-manual-level confidence.
+            ai_fallback = _generate_ai_diagnosis(query)
+            if ai_fallback:
+                rag_output["recommended_part"] = ai_fallback["recommended_part"]
+                rag_output["referenced_manual"] = (
+                    "AI-Generated Diagnosis (Gemini) — not from a certified manual, verify before dispatch"
+                )
+                rag_output["diagnostic_summary"] = ai_fallback["diagnostic_summary"]
+                rag_output["vector_match_score"] = 0.45
+                rag_output["bm25_keyword_score"] = 0.0
+                rag_output["cross_encoder_rerank_confidence"] = 0.45
+                rag_output["crag_intervention_triggered"] = True
+                rag_output["hallucination_grade"] = "AI_GENERATED_FALLBACK"
+            else:
+                # Gemini unavailable/failed too — fall back to the safe
+                # generic kit exactly as before (no regression).
+                rag_output["recommended_part"] = "Standard Certified Heavy Fleet Repair Kit (Part #FL-GEN-01)"
+                rag_output["referenced_manual"] = "No specific manual matched — generic fleet diagnostic applied"
+                rag_output["diagnostic_summary"] = (
+                    "No confident match found in the knowledge base for this issue type. "
+                    "A generic repair kit has been dispatched pending manual inspection."
+                )
+                rag_output["vector_match_score"] = 0.0
+                rag_output["bm25_keyword_score"] = 0.0
+                rag_output["cross_encoder_rerank_confidence"] = 0.0
+                rag_output["crag_intervention_triggered"] = True
+                rag_output["hallucination_grade"] = "CORRECTED_TO_SAFE_BASELINE"
         else:
             rag_output["crag_intervention_triggered"] = False
             rag_output["hallucination_grade"] = "PASSED_VERIFIED_AUTHENTIC"
