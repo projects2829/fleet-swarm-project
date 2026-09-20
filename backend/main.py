@@ -392,7 +392,7 @@ class EnterpriseAgenticRAGOrchestrator:
         return "Vision Agent check: Standard text telemetry verified (no damage photo provided)."
 
         def _geocode_location(self, address: str):
-        """Breakdown location ka lat/lng nikaalta hai, nearest hub sorting ke liye."""
+            """Breakdown location ka lat/lng nikaalta hai, nearest hub sorting ke liye."""
         if not GOOGLE_MAPS_API_KEY or not address:
             return None
         try:
