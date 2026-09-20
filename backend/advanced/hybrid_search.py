@@ -107,9 +107,28 @@ class HybridSearchEngine:
         return np.array(self.bm25.get_scores(_tokenize(query)))
 
     @staticmethod
-    def _rank_of(scores: np.ndarray) -> Dict[int, int]:
+    def _rank_of(scores: np.ndarray) -> Dict[int, float]:
+        """Tie-aware ranking. Plain np.argsort() breaks ties by array index —
+        on a small knowledge base, every query with NO real keyword/embedding
+        overlap makes all documents score exactly 0, and a naive argsort then
+        always hands document index 0 the top rank regardless of relevance.
+        Equal scores here get the same (averaged) rank instead, so a real tie
+        no longer systematically favors whichever document happens to be
+        first in the list."""
         order = np.argsort(-scores)
-        return {idx: rank for rank, idx in enumerate(order)}
+        sorted_scores = scores[order]
+        ranks = np.empty(len(scores))
+        n = len(scores)
+        i = 0
+        while i < n:
+            j = i
+            while j < n and sorted_scores[j] == sorted_scores[i]:
+                j += 1
+            avg_rank = (i + j - 1) / 2.0
+            for m in range(i, j):
+                ranks[order[m]] = avg_rank
+            i = j
+        return {idx: ranks[idx] for idx in range(n)}
 
     def _reciprocal_rank_fusion(
         self, dense_scores: np.ndarray, sparse_scores: np.ndarray, k: int = 60
