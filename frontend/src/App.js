@@ -3,12 +3,12 @@ import './App.css';
 
 function App() {
   const [formData, setFormData] = useState({
-    vehicle_id: 'SELECT VEHICLE',
-    location: 'TYPE BREAKOUT LOCATION WITH CITY',
-    destination: 'TYPE YOUR DESTINATION WITH CITY',
-    issue_type: 'WRITE YOUR ISSUE',
-    severity: 'TYPE',
-    cargo_type: 'YOUR LOAD TYPE'
+    vehicle_id: '',
+    location: '',
+    destination: '',
+    issue_type: '',
+    severity: '',
+    cargo_type: ''
   });
 
   const [loading, setLoading] = useState(false);
@@ -81,7 +81,7 @@ function App() {
   const nearestHub = supervisorTrace?.destination_workshop || 'Authorized Service Hub';
   const allNearbyHubs = supervisorTrace?.all_nearby_service_centers || [];
 
-    const searchScope = responseResult?.final_resolution?.service_center_search_scope;
+  const searchScope = responseResult?.final_resolution?.service_center_search_scope;
 
   const googleMapsRouteUrl =
     responseResult?.final_resolution?.open_full_route_url ||
@@ -143,7 +143,8 @@ function App() {
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div>
                 <label className="block text-xs font-medium text-slate-400 mb-1">Heavy Fleet Unit ID</label>
-                <select name="vehicle_id" value={formData.vehicle_id} onChange={handleChange} className="w-full p-2.5 bg-slate-950 border border-slate-700 rounded-lg text-sm text-white font-mono">
+                <select name="vehicle_id" value={formData.vehicle_id} onChange={handleChange} className="w-full p-2.5 bg-slate-950 border border-slate-700 rounded-lg text-sm text-white font-mono" required>
+                  <option value="" disabled>SELECT VEHICLE</option>
                   <option value="BR01GP9621">BR01GP9621</option>
                   <option value="BR01GM7465">BR01GM7465</option>
                   <option value="BR01GP0756">BR01GP0756</option>
@@ -153,31 +154,32 @@ function App() {
               </div>
               <div>
                 <label className="block text-xs font-medium text-slate-400 mb-1">Severity Level</label>
-                <select name="severity" value={formData.severity} onChange={handleChange} className="w-full p-2.5 bg-slate-950 border border-slate-700 rounded-lg text-sm text-white">
+                <select name="severity" value={formData.severity} onChange={handleChange} className="w-full p-2.5 bg-slate-950 border border-slate-700 rounded-lg text-sm text-white" required>
+                  <option value="" disabled>SELECT SEVERITY</option>
                   <option value="CRITICAL">CRITICAL</option>
                   <option value="MODERATE">MODERATE</option>
                 </select>
               </div>
               <div>
                 <label className="block text-xs font-medium text-slate-400 mb-1">Cargo Type</label>
-                <input type="text" name="cargo_type" value={formData.cargo_type} onChange={handleChange} className="w-full p-2.5 bg-slate-950 border border-slate-700 rounded-lg text-sm text-white" required />
+                <input type="text" name="cargo_type" value={formData.cargo_type} onChange={handleChange} placeholder="YOUR LOAD TYPE" className="w-full p-2.5 bg-slate-950 border border-slate-700 rounded-lg text-sm text-white" required />
               </div>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
                 <label className="block text-xs font-medium text-slate-400 mb-1">Breakdown Location (Origin)</label>
-                <input type="text" name="location" value={formData.location} onChange={handleChange} className="w-full p-2.5 bg-slate-950 border border-slate-700 rounded-lg text-sm text-white" required />
+                <input type="text" name="location" value={formData.location} onChange={handleChange} placeholder="TYPE BREAKDOWN LOCATION WITH CITY" className="w-full p-2.5 bg-slate-950 border border-slate-700 rounded-lg text-sm text-white" required />
               </div>
               <div>
                 <label className="block text-xs font-medium text-slate-400 mb-1">Destination Workshop / Hub</label>
-                <input type="text" name="destination" value={formData.destination} onChange={handleChange} className="w-full p-2.5 bg-slate-950 border border-slate-700 rounded-lg text-sm text-white" required />
+                <input type="text" name="destination" value={formData.destination} onChange={handleChange} placeholder="TYPE YOUR DESTINATION WITH CITY" className="w-full p-2.5 bg-slate-950 border border-slate-700 rounded-lg text-sm text-white" required />
               </div>
             </div>
 
             <div>
               <label className="block text-xs font-medium text-slate-400 mb-1">Issue Type / Breakdown Details</label>
-              <input type="text" name="issue_type" value={formData.issue_type} onChange={handleChange} className="w-full p-2.5 bg-slate-950 border border-slate-700 rounded-lg text-sm text-white" required />
+              <input type="text" name="issue_type" value={formData.issue_type} onChange={handleChange} placeholder="WRITE YOUR ISSUE" className="w-full p-2.5 bg-slate-950 border border-slate-700 rounded-lg text-sm text-white" required />
             </div>
 
             <button type="submit" disabled={loading} className="w-full bg-purple-600 hover:bg-purple-500 text-white font-medium py-3 rounded-lg transition shadow-lg shadow-purple-600/20 disabled:opacity-50">
@@ -285,7 +287,7 @@ function App() {
               </div>
 
               {/* Hubs List */}
-                           <div className="bg-slate-900/90 p-4 rounded-lg border border-slate-800 mb-5">
+              <div className="bg-slate-900/90 p-4 rounded-lg border border-slate-800 mb-5">
                 <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
                   <strong className="text-white block text-xs uppercase tracking-wider text-purple-400">
                     Detected Authorized Service Centers:
