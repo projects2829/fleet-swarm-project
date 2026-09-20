@@ -227,7 +227,7 @@ def _generate_ai_diagnosis(issue_type: str) -> Optional[Dict[str, str]]:
     try:
         url = (
             "https://generativelanguage.googleapis.com/v1beta/models/"
-            f"gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+            f"gemini-flash-latest:generateContent?key={GEMINI_API_KEY}"
         )
         prompt = (
             "You are a heavy commercial vehicle (truck/bus) diagnostic assistant "
