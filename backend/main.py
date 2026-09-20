@@ -85,7 +85,7 @@ class AdvancedHybridRAGEngine:
     hardcoded formula.
     """
     def __init__(self):
-        # Same Fleet Knowledge Base as before — manuals & precise part codes
+        # Fleet Knowledge Base — manuals & precise part codes
         self.knowledge_base = [
             {
                 "id": "DOC-01",
@@ -107,6 +107,48 @@ class AdvancedHybridRAGEngine:
                 "keywords": ["electrical", "sensor", "fuel", "filter", "harness", "pressure"],
                 "part_code": "Universal Heavy Fleet Fuel Filter & Sensor Kit (Part #FL-GEN-01)",
                 "content": "Standard electrical harness interruption or fuel line pressure fluctuation under heavy load."
+            },
+            {
+                "id": "DOC-04",
+                "manual": "Tata/Eicher Heavy Commercial Air Brake System Manual",
+                "keywords": ["brake", "brakes", "braking", "air brake", "brake pad", "brake failure", "brake fade"],
+                "part_code": "Heavy Duty Air Brake Chamber & Pad Kit (Part #TATA-7731-BR)",
+                "content": "Air pressure leak in brake chamber diaphragm or worn brake pad lining causing reduced braking force."
+            },
+            {
+                "id": "DOC-05",
+                "manual": "Heavy Commercial Tyre & Wheel Assembly Guide",
+                "keywords": ["tyre", "tire", "puncture", "burst", "wheel", "tread", "blowout"],
+                "part_code": "Heavy Duty Radial Tyre & Rim Assembly (Part #FL-TYR-14)",
+                "content": "Tyre tread separation or sudden blowout detected, likely due to overloading or under-inflation."
+            },
+            {
+                "id": "DOC-06",
+                "manual": "Eicher Heavy Suspension & Chassis Manual",
+                "keywords": ["suspension", "shock", "spring", "leaf spring", "axle", "chassis", "bounce"],
+                "part_code": "Heavy Duty Leaf Spring & Shock Absorber Kit (Part #EIC-6620-SU)",
+                "content": "Leaf spring crack or shock absorber failure detected, causing excessive chassis bounce under load."
+            },
+            {
+                "id": "DOC-07",
+                "manual": "Fleet Electrical & Battery Systems Guide",
+                "keywords": ["battery", "electrical", "starter", "alternator", "dead battery", "not starting", "ignition"],
+                "part_code": "Heavy Duty Battery & Alternator Assembly (Part #FL-BAT-09)",
+                "content": "Battery drain or alternator charging failure detected, vehicle unable to hold ignition charge."
+            },
+            {
+                "id": "DOC-08",
+                "manual": "Tata Prima Cabin Comfort & AC Systems Manual",
+                "keywords": ["ac", "air conditioning", "cooling", "compressor", "cabin", "not cooling"],
+                "part_code": "Heavy Duty AC Compressor & Condenser Kit (Part #TATA-5510-AC)",
+                "content": "AC compressor clutch failure or refrigerant leak detected, cabin cooling system not functioning."
+            },
+            {
+                "id": "DOC-09",
+                "manual": "General Commercial Fleet Exhaust & Emission Guide",
+                "keywords": ["exhaust", "smoke", "emission", "silencer", "muffler", "black smoke", "turbo"],
+                "part_code": "Heavy Duty Exhaust Manifold & Turbo Seal Kit (Part #FL-EXH-03)",
+                "content": "Exhaust manifold leak or turbocharger seal failure detected, causing excess smoke and power loss."
             }
         ]
         # "text" is what the real BM25/vector index searches over — includes
@@ -149,10 +191,17 @@ class AdvancedHybridRAGEngine:
         fused_score = top.get("fused_score", 0.0)
         if rerank_score is not None:
             vector_match_score = round(min(0.99, max(0.5, rerank_score)), 3)
+        elif top_bm25 <= 0:
+            # Zero real keyword overlap with ANY manual — this is a genuine
+            # "no confident match" case (issue_type doesn't match this small
+            # knowledge base), so say so honestly instead of a reassuring
+            # fixed 75% floor.
+            vector_match_score = 0.30
         else:
             # No reranker installed -> derive a real (not fake) confidence
-            # from the actual fused BM25+dense score instead of a constant.
-            vector_match_score = round(min(0.99, 0.75 + fused_score * 2), 3)
+            # from actual BM25 keyword overlap strength, scaled so it only
+            # reads high when there IS real overlap.
+            vector_match_score = round(min(0.95, 0.55 + bm25_normalized * 0.4 + fused_score * 2), 3)
 
         return {
             "vector_match_score": vector_match_score,
