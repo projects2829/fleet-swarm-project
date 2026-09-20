@@ -238,8 +238,21 @@ class CorrectiveRAGValidator:
 
         confidence = rag_output.get("cross_encoder_rerank_confidence", 0.9)
         if not hallucination_check["grounded"] or confidence < 0.75:
-            # Corrective RAG Trigger: Fallback to safe standard heavy kit
+            # Corrective RAG Trigger: fallback to safe standard heavy kit.
+            # Every displayed field is overwritten together here — leaving
+            # the old manual/content behind while only swapping the part
+            # code produced a nonsensical mixed result (e.g. "Tata Prima
+            # coolant manual" + "generic repair kit" + "radiator choke"
+            # content, none of which belong together).
             rag_output["recommended_part"] = "Standard Certified Heavy Fleet Repair Kit (Part #FL-GEN-01)"
+            rag_output["referenced_manual"] = "No specific manual matched — generic fleet diagnostic applied"
+            rag_output["diagnostic_summary"] = (
+                "No confident match found in the knowledge base for this issue type. "
+                "A generic repair kit has been dispatched pending manual inspection."
+            )
+            rag_output["vector_match_score"] = 0.0
+            rag_output["bm25_keyword_score"] = 0.0
+            rag_output["cross_encoder_rerank_confidence"] = 0.0
             rag_output["crag_intervention_triggered"] = True
             rag_output["hallucination_grade"] = "CORRECTED_TO_SAFE_BASELINE"
         else:
