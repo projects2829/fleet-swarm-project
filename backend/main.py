@@ -72,6 +72,69 @@ class EnterpriseObservabilityTracer:
         print(f"📊 [OBSERVABILITY TRACE] Agent: {agent_name} | Type: {span_type} | Latency: {latency_ms}ms")
 
 # ==========================================
+# KNOWLEDGE BASE LOADER — reads ANY number of JSON files from
+# backend/knowledge_base/, so the corpus can grow to hundreds/thousands of
+# manual excerpts (covering the whole India fleet) without ever touching
+# main.py again. Falls back to a small built-in seed list only if the
+# folder is missing/empty, so the app never breaks on a fresh checkout.
+# ==========================================
+KNOWLEDGE_BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "knowledge_base")
+
+
+def _load_knowledge_base() -> List[Dict[str, Any]]:
+    docs: List[Dict[str, Any]] = []
+    seen_ids = set()
+
+    if os.path.isdir(KNOWLEDGE_BASE_DIR):
+        for filename in sorted(os.listdir(KNOWLEDGE_BASE_DIR)):
+            if not filename.endswith(".json"):
+                continue
+            filepath = os.path.join(KNOWLEDGE_BASE_DIR, filename)
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+            except Exception as e:
+                print(f"[knowledge_base] WARNING: could not parse {filename}: {e}")
+                continue
+
+            entries = loaded if isinstance(loaded, list) else [loaded]
+            for entry in entries:
+                required = {"id", "manual", "keywords", "part_code", "content"}
+                if not required.issubset(entry.keys()):
+                    print(f"[knowledge_base] WARNING: skipping malformed entry in {filename} "
+                          f"(missing one of {required})")
+                    continue
+                if entry["id"] in seen_ids:
+                    print(f"[knowledge_base] WARNING: duplicate id '{entry['id']}' in {filename}, skipping.")
+                    continue
+                seen_ids.add(entry["id"])
+                docs.append(entry)
+
+    if docs:
+        print(f"[knowledge_base] Loaded {len(docs)} documents from {KNOWLEDGE_BASE_DIR}")
+        return docs
+
+    print(f"[knowledge_base] WARNING: no valid JSON docs found in {KNOWLEDGE_BASE_DIR}, "
+          f"using built-in seed knowledge base.")
+    return [
+        {
+            "id": "DOC-01",
+            "manual": "Tata Prima / Signa Heavy Commercial Maintenance Manual v4.2",
+            "keywords": ["overheat", "temperature", "radiator", "coolant", "thermostat"],
+            "part_code": "Heavy Duty Coolant Pump & Thermostat Assembly (Part #TATA-9942-OH)",
+            "content": "Radiator core choke or thermostat valve blockage detected leading to coolant flow restriction."
+        },
+        {
+            "id": "DOC-03",
+            "manual": "General Commercial Fleet Telemetry & Fault Guide",
+            "keywords": ["electrical", "sensor", "fuel", "filter", "harness", "pressure"],
+            "part_code": "Universal Heavy Fleet Fuel Filter & Sensor Kit (Part #FL-GEN-01)",
+            "content": "Standard electrical harness interruption or fuel line pressure fluctuation under heavy load."
+        }
+    ]
+
+
+# ==========================================
 # 1. HYBRID SEARCH + VECTOR DB + BM25 & CROSS-ENCODER RERANKER
 # ==========================================
 class AdvancedHybridRAGEngine:
@@ -85,72 +148,10 @@ class AdvancedHybridRAGEngine:
     hardcoded formula.
     """
     def __init__(self):
-        # Fleet Knowledge Base — manuals & precise part codes
-        self.knowledge_base = [
-            {
-                "id": "DOC-01",
-                "manual": "Tata Prima / Signa Heavy Commercial Maintenance Manual v4.2",
-                "keywords": ["overheat", "temperature", "radiator", "coolant", "thermostat"],
-                "part_code": "Heavy Duty Coolant Pump & Thermostat Assembly (Part #TATA-9942-OH)",
-                "content": "Radiator core choke or thermostat valve blockage detected leading to coolant flow restriction."
-            },
-            {
-                "id": "DOC-02",
-                "manual": "Eicher Pro Series Heavy Duty Transmission Guide",
-                "keywords": ["transmission", "gear", "clutch", "booster", "actuator", "slip"],
-                "part_code": "Eicher Heavy Transmission Actuator Seal Kit (Part #EIC-8812-TR)",
-                "content": "Hydraulic clutch booster pressure drop or gear actuator slip causing shifting failures."
-            },
-            {
-                "id": "DOC-03",
-                "manual": "General Commercial Fleet Telemetry & Fault Guide",
-                "keywords": ["electrical", "sensor", "fuel", "filter", "harness", "pressure"],
-                "part_code": "Universal Heavy Fleet Fuel Filter & Sensor Kit (Part #FL-GEN-01)",
-                "content": "Standard electrical harness interruption or fuel line pressure fluctuation under heavy load."
-            },
-            {
-                "id": "DOC-04",
-                "manual": "Tata/Eicher Heavy Commercial Air Brake System Manual",
-                "keywords": ["brake", "brakes", "braking", "air brake", "brake pad", "brake failure", "brake fade"],
-                "part_code": "Heavy Duty Air Brake Chamber & Pad Kit (Part #TATA-7731-BR)",
-                "content": "Air pressure leak in brake chamber diaphragm or worn brake pad lining causing reduced braking force."
-            },
-            {
-                "id": "DOC-05",
-                "manual": "Heavy Commercial Tyre & Wheel Assembly Guide",
-                "keywords": ["tyre", "tire", "puncture", "burst", "wheel", "tread", "blowout"],
-                "part_code": "Heavy Duty Radial Tyre & Rim Assembly (Part #FL-TYR-14)",
-                "content": "Tyre tread separation or sudden blowout detected, likely due to overloading or under-inflation."
-            },
-            {
-                "id": "DOC-06",
-                "manual": "Eicher Heavy Suspension & Chassis Manual",
-                "keywords": ["suspension", "shock", "spring", "leaf spring", "axle", "chassis", "bounce"],
-                "part_code": "Heavy Duty Leaf Spring & Shock Absorber Kit (Part #EIC-6620-SU)",
-                "content": "Leaf spring crack or shock absorber failure detected, causing excessive chassis bounce under load."
-            },
-            {
-                "id": "DOC-07",
-                "manual": "Fleet Electrical & Battery Systems Guide",
-                "keywords": ["battery", "electrical", "starter", "alternator", "dead battery", "not starting", "ignition"],
-                "part_code": "Heavy Duty Battery & Alternator Assembly (Part #FL-BAT-09)",
-                "content": "Battery drain or alternator charging failure detected, vehicle unable to hold ignition charge."
-            },
-            {
-                "id": "DOC-08",
-                "manual": "Tata Prima Cabin Comfort & AC Systems Manual",
-                "keywords": ["ac", "air conditioning", "cooling", "compressor", "cabin", "not cooling"],
-                "part_code": "Heavy Duty AC Compressor & Condenser Kit (Part #TATA-5510-AC)",
-                "content": "AC compressor clutch failure or refrigerant leak detected, cabin cooling system not functioning."
-            },
-            {
-                "id": "DOC-09",
-                "manual": "General Commercial Fleet Exhaust & Emission Guide",
-                "keywords": ["exhaust", "smoke", "emission", "silencer", "muffler", "black smoke", "turbo"],
-                "part_code": "Heavy Duty Exhaust Manifold & Turbo Seal Kit (Part #FL-EXH-03)",
-                "content": "Exhaust manifold leak or turbocharger seal failure detected, causing excess smoke and power loss."
-            }
-        ]
+        # Fleet Knowledge Base — loaded from backend/knowledge_base/*.json,
+        # NOT hardcoded here. Drop new .json files in that folder to grow
+        # the corpus; no code change needed.
+        self.knowledge_base = _load_knowledge_base()
         # "text" is what the real BM25/vector index searches over — includes
         # the part code itself so the hallucination grader (below) can later
         # confirm the recommended part is genuinely grounded in this text.
@@ -198,10 +199,17 @@ class AdvancedHybridRAGEngine:
             # fixed 75% floor.
             vector_match_score = 0.30
         else:
-            # No reranker installed -> derive a real (not fake) confidence
-            # from actual BM25 keyword overlap strength, scaled so it only
-            # reads high when there IS real overlap.
-            vector_match_score = round(min(0.95, 0.55 + bm25_normalized * 0.4 + fused_score * 2), 3)
+            # No reranker installed -> derive confidence from the raw BM25
+            # top score, scaled against an empirical "confident match"
+            # ceiling (genuine multi-keyword hits typically score several
+            # points; a single stray common-word overlap scores much lower).
+            # NOTE: fused_score is intentionally NOT used here — its scale
+            # differs depending on whether dense embeddings are active
+            # (tiny ~0.03 RRF values) or not (raw BM25 magnitude, unbounded),
+            # and mixing those two scales previously produced nonsense
+            # confidence values (e.g. ~95% for one coincidental word match).
+            normalized_strength = min(1.0, top_bm25 / 4.0)
+            vector_match_score = round(min(0.95, 0.35 + normalized_strength * 0.55), 3)
 
         return {
             "vector_match_score": vector_match_score,
@@ -213,6 +221,14 @@ class AdvancedHybridRAGEngine:
             # internal-only field, consumed and stripped by CorrectiveRAGValidator below
             "_grounding_text": top["text"],
         }
+
+
+# Build the hybrid search index (BM25 + optional dense embeddings) ONCE at
+# server startup, not once per incoming request. With a small 9-doc corpus
+# rebuilding it every request was wasteful but tolerable; with hundreds or
+# thousands of real fleet manuals it would make every single API call slow
+# and eventually time out. All requests now share this one loaded engine.
+GLOBAL_HYBRID_RAG_ENGINE = AdvancedHybridRAGEngine()
 
 
 def _generate_ai_diagnosis(issue_type: str) -> Optional[Dict[str, str]]:
@@ -731,8 +747,7 @@ class EnterpriseAgenticRAGOrchestrator:
         full_route_url = self._build_full_route_url(service_intel.get("hub_waypoint"))
         
         # 1. Hybrid Search + Reranking Execution
-        hybrid_engine = AdvancedHybridRAGEngine()
-        raw_rag = hybrid_engine.hybrid_retrieve_and_rerank(self.incident.issue_type)
+        raw_rag = GLOBAL_HYBRID_RAG_ENGINE.hybrid_retrieve_and_rerank(self.incident.issue_type)
         
         # 3. Corrective RAG (CRAG) Validation & Hallucination Grading
         rag_intel = CorrectiveRAGValidator.evaluate_and_correct(self.incident.issue_type, raw_rag)
