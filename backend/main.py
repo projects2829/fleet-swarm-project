@@ -391,8 +391,8 @@ class EnterpriseAgenticRAGOrchestrator:
             return "Vision Agent inspected attachment: Heavy leakage identified on coolant line manifold. Auto-adjusted part diagnostics confidence."
         return "Vision Agent check: Standard text telemetry verified (no damage photo provided)."
 
-        def _geocode_location(self, address: str):
-            """Breakdown location ka lat/lng nikaalta hai, nearest hub sorting ke liye."""
+    def _geocode_location(self, address: str):
+        """Breakdown location ka lat/lng nikaalta hai, nearest hub sorting ke liye."""
         if not GOOGLE_MAPS_API_KEY or not address:
             return None
         try:
@@ -429,7 +429,7 @@ class EnterpriseAgenticRAGOrchestrator:
         return base
         
     @traced("fetch_google_maps_route")
-        def _fetch_google_maps_route(self, via_hub: Optional[str] = None):
+    def _fetch_google_maps_route(self, via_hub: Optional[str] = None):
         if not GOOGLE_MAPS_API_KEY or not self.incident.destination:
             return None
         url = "https://maps.googleapis.com/maps/api/directions/json"
@@ -471,7 +471,7 @@ class EnterpriseAgenticRAGOrchestrator:
         return None
 
     @traced("heavy_service_center_intelligence")
-        def _get_heavy_service_center_intelligence(self):
+    def _get_heavy_service_center_intelligence(self):
         raw_hubs = []
         loc_lower = (self.incident.location or "").lower()
         is_outside_patna = "patna" not in loc_lower
@@ -645,11 +645,10 @@ class EnterpriseAgenticRAGOrchestrator:
         # Agent 3: Logistics & Route Dispatch Agent Trace
         self.step_counter += 1
         t_start = time.time()
-                routing = {
+        routing = {
             "total_distance": map_route["distance_text"] if map_route else "310 km",
             "estimated_travel_time": map_route["duration_text"] if map_route else "6 hours",
             "primary_route_status": "HEAVY_CORRIDOR_OPTIMIZED",
-
             "hyper_accurate_alternative_route": f"Optimized transit to {service_intel['hub'].split('—')[0]}",
             "breakdown_to_service_center": map_route.get("leg_breakdown_to_service_center") if map_route else "Live leg unavailable",
             "service_center_to_destination": map_route.get("leg_service_center_to_destination") if map_route else "Live leg unavailable",
@@ -682,9 +681,9 @@ class EnterpriseAgenticRAGOrchestrator:
             traces=self.traces,
             final_resolution={
                 "vehicle_id": self.incident.vehicle_id,
-                            "service_center_search_scope": service_intel["search_scope"],
-            "nearest_hub_contact": service_intel["hub_phone"],
-            "open_full_route_url": full_route_url,
+                "service_center_search_scope": service_intel["search_scope"],
+                "nearest_hub_contact": service_intel["hub_phone"],
+                "open_full_route_url": full_route_url,
                 "assigned_whatsapp": assigned_phone,
                 "origin": self.incident.location,
                 "primary_nearest_hub": service_intel["hub"],
