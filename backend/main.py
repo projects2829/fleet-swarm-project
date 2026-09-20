@@ -474,15 +474,15 @@ class EnterpriseAgenticRAGOrchestrator:
             "hitl_status": "WAITING_FOR_WHATSAPP_INTERACTIVE_BUTTON_OR_TEXT"
         }
         lat_1 = round((time.time() - t_start) * 1000, 2)
-        self.traces.append(AgentTrace(step_name="Triage_and_Vision_Agent", agent_role="Supervisor & Multi-Modal Vision Agent", status="SUCCESS", timestamp=lat_1, output_payload=sup_dec))
-        self.tracer.log_span("Triage_and_Vision_Agent", "AGENT_NODE", self.incident.dict(), sup_dec, lat_1, 180)
+        self.traces.append(AgentTrace(step_name="Supervisor_Triage", agent_role="Supervisor & Multi-Modal Vision Agent", status="SUCCESS", timestamp=lat_1, output_payload=sup_dec))
+        self.tracer.log_span("Supervisor_Triage", "AGENT_NODE", self.incident.dict(), sup_dec, lat_1, 180)
 
         # Agent 2: Hybrid RAG + Corrective RAG (CRAG) Agent Trace
         self.step_counter += 1
         t_start = time.time()
         lat_2 = round((time.time() - t_start) * 1000, 2)
-        self.traces.append(AgentTrace(step_name="Hybrid_RAG_and_CRAG_Diagnostics", agent_role="Hybrid Vector/BM25 + CRAG Agent", status="SUCCESS", timestamp=lat_2, output_payload=rag_intel))
-        self.tracer.log_span("Hybrid_RAG_and_CRAG_Diagnostics", "RAG_RETRIEVAL", {"issue": self.incident.issue_type}, rag_intel, lat_2, 220)
+        self.traces.append(AgentTrace(step_name="Agentic_RAG_Diagnostics", agent_role="Hybrid Vector/BM25 + CRAG Agent", status="SUCCESS", timestamp=lat_2, output_payload=rag_intel))
+        self.tracer.log_span("Agentic_RAG_Diagnostics", "RAG_RETRIEVAL", {"issue": self.incident.issue_type}, rag_intel, lat_2, 220)
 
         # Agent 3: Logistics & Route Dispatch Agent Trace
         self.step_counter += 1
@@ -494,8 +494,8 @@ class EnterpriseAgenticRAGOrchestrator:
             "hyper_accurate_alternative_route": f"Optimized transit to {service_intel['hub'].split('—')[0]}"
         }
         lat_3 = round((time.time() - t_start) * 1000, 2)
-        self.traces.append(AgentTrace(step_name="Logistics_and_Dispatch_Agent", agent_role="Routing & Logistics Agent", status="SUCCESS", timestamp=lat_3, output_payload=routing))
-        self.tracer.log_span("Logistics_and_Dispatch_Agent", "ROUTING_NODE", {"destination": service_intel["hub"]}, routing, lat_3, 130)
+        self.traces.append(AgentTrace(step_name="Routing_Recalculation", agent_role="Routing & Logistics Agent", status="SUCCESS", timestamp=lat_3, output_payload=routing))
+        self.tracer.log_span("Routing_Recalculation", "ROUTING_NODE", {"destination": service_intel["hub"]}, routing, lat_3, 130)
 
         # Agent 4: Manager Approval & ERP Sync Agent Trace
         self.step_counter += 1
