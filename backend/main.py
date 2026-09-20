@@ -1078,3 +1078,28 @@ async def whatsapp_webhook(request: Request):
 @app.get("/api/health")
 async def health_check():
     return {"status": "online", "engine": "Enterprise Agentic AI RAG & Swarm Orchestrator v5.0.0-GoogleLevel"}
+
+@app.get("/api/test-gemini")
+async def test_gemini():
+    """Browser me seedha khol ke Gemini key/model test karne ke liye —
+    koi local terminal/curl ki zaroorat nahi. Sirf debugging ke liye hai."""
+    if not GEMINI_API_KEY:
+        return {"status": "error", "reason": "GEMINI_API_KEY environment variable is not set on Render."}
+    try:
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            f"gemini-flash-latest:generateContent?key={GEMINI_API_KEY}"
+        )
+        body = {"contents": [{"parts": [{"text": "Say hello in one word"}]}]}
+        resp = requests.post(url, json=body, timeout=10)
+        if resp.status_code != 200:
+            return {
+                "status": "error",
+                "http_status": resp.status_code,
+                "google_response": resp.json()
+            }
+        data = resp.json()
+        reply_text = data["candidates"][0]["content"]["parts"][0]["text"]
+        return {"status": "success", "gemini_replied": reply_text}
+    except Exception as e:
+        return {"status": "exception", "details": str(e)}
