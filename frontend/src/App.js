@@ -3,12 +3,12 @@ import './App.css';
 
 function App() {
   const [formData, setFormData] = useState({
-    vehicle_id: 'BR01GP9621',
-    location: 'Atal Path, Patna, Bihar, India',
-    destination: 'Pragati Path, Barmasia Rd, Katihar, Bihar 854105, India',
-    issue_type: 'Engine Overheat & Transmission Breakdown',
-    severity: 'CRITICAL',
-    cargo_type: 'Heavy Construction Steel Rods'
+    vehicle_id: 'SELECT VEHICLE',
+    location: 'TYPE BREAKOUT LOCATION WITH CITY',
+    destination: 'TYPE YOUR DESTINATION WITH CITY',
+    issue_type: 'WRITE YOUR ISSUE',
+    severity: 'TYPE',
+    cargo_type: 'YOUR LOAD TYPE'
   });
 
   const [loading, setLoading] = useState(false);
