@@ -285,10 +285,21 @@ function App() {
               </div>
 
               {/* Hubs List */}
-              <div className="bg-slate-900/90 p-4 rounded-lg border border-slate-800 mb-5">
-                <strong className="text-white block mb-3 text-xs uppercase tracking-wider text-purple-400">
-                  Detected Authorized Service Centers:
-                </strong>
+                           <div className="bg-slate-900/90 p-4 rounded-lg border border-slate-800 mb-5">
+                <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+                  <strong className="text-white block text-xs uppercase tracking-wider text-purple-400">
+                    Detected Authorized Service Centers:
+                  </strong>
+                  {searchScope && (
+                    <span className={`text-[10px] font-bold px-2 py-1 rounded-full border uppercase tracking-wider ${
+                      searchScope === 'STATEWIDE_BIHAR'
+                        ? 'bg-amber-950/50 border-amber-500/40 text-amber-300'
+                        : 'bg-blue-950/50 border-blue-500/40 text-blue-300'
+                    }`}>
+                      {searchScope === 'STATEWIDE_BIHAR' ? '🗺️ Statewide Bihar Search' : '📍 Patna Metro Search'}
+                    </span>
+                  )}
+                </div>
                 <ul className="space-y-2.5 text-xs text-slate-300">
                   {allNearbyHubs.map((hubName, idx) => (
                     <li key={idx} className="bg-slate-950 p-3 rounded-lg border border-slate-800/80 font-mono flex items-start gap-3 shadow-inner">
