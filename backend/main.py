@@ -27,6 +27,20 @@ app.add_middleware(
 
 MANAGER_WHATSAPP_NUMBER = "+916209313108"
 
+# TEMPORARY TESTING OVERRIDE — Spare-Part Price Comparison feature.
+# Fill in real numbers here to test the quote/negotiation flow RIGHT NOW
+# (works only with numbers added to your Meta "allowed test recipients"
+# list, or once your quote-request template is approved).
+#
+# Once your Meta message template is approved, just set this back to an
+# EMPTY LIST — the system will automatically switch back to using the
+# real nearby vendors that Google Places finds for each incident. No other
+# code change needed.
+TEST_VENDOR_NUMBERS = [
+    # {"name": "Test Vendor 1", "phone": "+91XXXXXXXXXX"},
+    # {"name": "Test Vendor 2", "phone": "+91XXXXXXXXXX"},
+]
+
 # Fleet Unit ID to WhatsApp Number mapping
 DRIVER_WHATSAPP_MAPPING = {
     "BR01GP9621": "+917858847385",
@@ -322,12 +336,17 @@ def _transcribe_voice_note(audio_bytes: bytes, mime_type: str = "audio/ogg") -> 
 # negotiate bhi kar leta hai.
 # ==========================================
 def _request_spare_part_quotes(incident_id: str, hub_records: List[Dict[str, Any]], part_name: str):
-    """Top 3 nearby hubs ko WhatsApp par part ki price/availability poochta hai."""
-    targets = []
-    for hub in hub_records[:3]:
-        phone = _resolve_hub_phone(hub)
-        if phone and "not available" not in phone.lower():
-            targets.append({"name": hub["name"], "phone": phone})
+    """Top 3 nearby hubs ko WhatsApp par part ki price/availability poochta hai.
+    Agar TEST_VENDOR_NUMBERS me kuch bhara hai, wahi use hoga (testing mode) —
+    warna real Google-Places-derived nearby vendors automatically use hote hain."""
+    if TEST_VENDOR_NUMBERS:
+        targets = list(TEST_VENDOR_NUMBERS)
+    else:
+        targets = []
+        for hub in hub_records[:3]:
+            phone = _resolve_hub_phone(hub)
+            if phone and "not available" not in phone.lower():
+                targets.append({"name": hub["name"], "phone": phone})
 
     if not targets:
         return
@@ -343,14 +362,35 @@ def _request_spare_part_quotes(incident_id: str, hub_records: List[Dict[str, Any
         }
     }
 
+    failed_vendors = []
     for t in targets:
-        send_whatsapp_text_reply(
+        result = send_whatsapp_text_reply(
             t["phone"],
             f"🔧 *Fleet Parts Enquiry*\n\n"
             f"Namaste, kya aapke paas ye part available hai?\n"
             f"*Part:* {part_name}\n\n"
             f"Kripya reply karein: availability aur best price ke saath. Dhanyavaad!"
         )
+        delivery_failed = (
+            result.get("status") == "error"
+            or (result.get("status_code") is not None and result.get("status_code") != 200)
+        )
+        if delivery_failed:
+            failed_vendors.append(t["name"])
+            vendor_key = ''.join(filter(str.isdigit, t["phone"]))[-10:]
+            PENDING_QUOTES[incident_id]["vendors"].pop(vendor_key, None)
+
+    if failed_vendors:
+        send_whatsapp_text_reply(
+            MANAGER_WHATSAPP_NUMBER,
+            f"⚠️ Could not reach {len(failed_vendors)} vendor(s) for a price quote on "
+            f"'{part_name}' — their number may not be reachable via WhatsApp Business API "
+            f"yet (needs a prior conversation or an approved message template): "
+            f"{', '.join(failed_vendors)}"
+        )
+
+    if not PENDING_QUOTES.get(incident_id, {}).get("vendors"):
+        PENDING_QUOTES.pop(incident_id, None)
 
 
 def _extract_price_from_reply(vendor_text: str) -> Optional[Dict[str, Any]]:
