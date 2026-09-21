@@ -42,6 +42,16 @@ INCIDENT_CONTEXTS = {}   # phone -> incident_id
 INCIDENT_DETAILS = {}    # incident_id -> full context dict (for AI replies)
 ACTIVE_VEHICLE_BY_PHONE = {}
 
+# Feature: Spare-Part Price Comparison — tracks outstanding quote requests
+# sent to nearby service centers, keyed by incident_id.
+PENDING_QUOTES = {}
+# 10-digit phone -> vehicle_id, reverse of DRIVER_WHATSAPP_MAPPING, so an
+# inbound voice note can be matched to a vehicle without the driver typing it.
+DRIVER_PHONE_TO_VEHICLE = {
+    ''.join(filter(str.isdigit, phone))[-10:]: vid
+    for vid, phone in DRIVER_WHATSAPP_MAPPING.items()
+}
+
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 WHATSAPP_PHONE_ID = os.getenv("PHONE_NUMBER_ID", "1340284595815318")
 VERIFY_TOKEN = "fleet_secret_token_2026"
@@ -229,6 +239,213 @@ class AdvancedHybridRAGEngine:
 # thousands of real fleet manuals it would make every single API call slow
 # and eventually time out. All requests now share this one loaded engine.
 GLOBAL_HYBRID_RAG_ENGINE = AdvancedHybridRAGEngine()
+
+
+# ==========================================
+# VOICE NOTE SUPPORT — driver bolke breakdown report kar sake, type kiye
+# bina. WhatsApp audio message ko Meta se download karke Gemini se transcribe
+# + structured fields (vehicle_id, location, issue_type) extract karta hai.
+# ==========================================
+def _download_whatsapp_media(media_id: str) -> Optional[bytes]:
+    """Meta Graph API se media ID ka actual audio file download karta hai."""
+    if not WHATSAPP_TOKEN:
+        return None
+    try:
+        meta_url = f"https://graph.facebook.com/v26.0/{media_id}"
+        headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
+        meta_resp = requests.get(meta_url, headers=headers, timeout=10)
+        meta_resp.raise_for_status()
+        media_url = meta_resp.json().get("url")
+        if not media_url:
+            return None
+        file_resp = requests.get(media_url, headers=headers, timeout=15)
+        file_resp.raise_for_status()
+        return file_resp.content
+    except Exception as e:
+        print(f"DEBUG VOICE NOTE DOWNLOAD ERROR: {str(e)}")
+        return None
+
+
+def _transcribe_voice_note(audio_bytes: bytes, mime_type: str = "audio/ogg") -> Optional[Dict[str, str]]:
+    """Voice note (Hindi/Hinglish/regional) ko Gemini se seedha samajh ke
+    incident ke zaroori fields (vehicle_id, location, issue_type) nikaalta
+    hai — driver ko form fill karne ki zaroorat nahi, sirf bol dena kaafi hai."""
+    if not GEMINI_API_KEY:
+        return None
+    try:
+        import base64
+        audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            f"gemini-flash-latest:generateContent?key={GEMINI_API_KEY}"
+        )
+        prompt = (
+            "This is a voice note from a truck/bus driver in India, likely in Hindi, "
+            "Hinglish, or a regional language, reporting a vehicle breakdown. Listen to it "
+            "and respond ONLY with strict JSON, no markdown fences, no preamble, in this "
+            "exact shape:\n"
+            '{"vehicle_id": "<vehicle number/ID if mentioned, else \\"UNKNOWN\\">", '
+            '"location": "<place name if mentioned, else \\"UNKNOWN\\">", '
+            '"issue_type": "<short English description of the mechanical issue described>"}'
+        )
+        body = {
+            "contents": [{
+                "parts": [
+                    {"text": prompt},
+                    {"inline_data": {"mime_type": mime_type, "data": audio_b64}}
+                ]
+            }]
+        }
+        resp = requests.post(url, json=body, timeout=20)
+        resp.raise_for_status()
+        data = resp.json()
+        raw_text = data["candidates"][0]["content"]["parts"][0]["text"]
+        cleaned = raw_text.strip().strip("`")
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:].strip()
+        parsed = json.loads(cleaned)
+        if parsed.get("issue_type"):
+            return {
+                "vehicle_id": parsed.get("vehicle_id", "UNKNOWN"),
+                "location": parsed.get("location", "UNKNOWN"),
+                "issue_type": parsed["issue_type"],
+            }
+    except Exception as e:
+        print(f"DEBUG VOICE NOTE TRANSCRIBE ERROR: {str(e)}")
+    return None
+
+
+# ==========================================
+# SPARE-PART PRICE COMPARISON — jab service centre milta hai, top nearby
+# vendors se real-time quote maanga jaata hai; jawab aane par AI compare
+# karke best price manager ko dikhata hai, aur zaroorat par ek round
+# negotiate bhi kar leta hai.
+# ==========================================
+def _request_spare_part_quotes(incident_id: str, hub_records: List[Dict[str, Any]], part_name: str):
+    """Top 3 nearby hubs ko WhatsApp par part ki price/availability poochta hai."""
+    targets = []
+    for hub in hub_records[:3]:
+        phone = _resolve_hub_phone(hub)
+        if phone and "not available" not in phone.lower():
+            targets.append({"name": hub["name"], "phone": phone})
+
+    if not targets:
+        return
+
+    PENDING_QUOTES[incident_id] = {
+        "part_name": part_name,
+        "vendors": {
+            ''.join(filter(str.isdigit, t["phone"]))[-10:]: {
+                "hub_name": t["name"], "phone": t["phone"],
+                "status": "waiting", "price": None, "negotiated": False
+            }
+            for t in targets
+        }
+    }
+
+    for t in targets:
+        send_whatsapp_text_reply(
+            t["phone"],
+            f"🔧 *Fleet Parts Enquiry*\n\n"
+            f"Namaste, kya aapke paas ye part available hai?\n"
+            f"*Part:* {part_name}\n\n"
+            f"Kripya reply karein: availability aur best price ke saath. Dhanyavaad!"
+        )
+
+
+def _extract_price_from_reply(vendor_text: str) -> Optional[Dict[str, Any]]:
+    """Vendor ke natural-language reply se price + availability nikaalta hai."""
+    if not GEMINI_API_KEY:
+        return None
+    try:
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            f"gemini-flash-latest:generateContent?key={GEMINI_API_KEY}"
+        )
+        prompt = (
+            "A spare-parts vendor in India replied to a price enquiry. Their message:\n\n"
+            f"\"{vendor_text}\"\n\n"
+            "Respond ONLY with strict JSON, no markdown, no preamble:\n"
+            '{"available": true/false, "price_inr": <number or null if not mentioned>}'
+        )
+        body = {"contents": [{"parts": [{"text": prompt}]}]}
+        resp = requests.post(url, json=body, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        raw_text = data["candidates"][0]["content"]["parts"][0]["text"]
+        cleaned = raw_text.strip().strip("`")
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:].strip()
+        return json.loads(cleaned)
+    except Exception as e:
+        print(f"DEBUG PRICE EXTRACT ERROR: {str(e)}")
+        return None
+
+
+def _handle_vendor_quote_reply(incident_id: str, vendor_10_digit: str, text_body: str) -> bool:
+    """Ek vendor ka reply process karta hai: price nikaalta hai, zaroorat par
+    ek round negotiate karta hai, aur jab sab quotes aa jayein to manager ko
+    comparison bhejta hai. True return karta hai agar ye genuinely ek vendor
+    reply tha (taaki caller ise normal driver-chat se confuse na kare)."""
+    quote_ctx = PENDING_QUOTES.get(incident_id)
+    if not quote_ctx or vendor_10_digit not in quote_ctx["vendors"]:
+        return False
+
+    vendor = quote_ctx["vendors"][vendor_10_digit]
+    parsed = _extract_price_from_reply(text_body)
+    if not parsed:
+        return True
+
+    if parsed.get("available") and parsed.get("price_inr"):
+        price = float(parsed["price_inr"])
+
+        # Ek round negotiation: agar koi doosra vendor sasta quote de chuka hai
+        # aur is vendor se abhi negotiate nahi kiya, to AI khud ek counter-offer
+        # bhej deta hai — manager ko intervene nahi karna padta.
+        cheaper_others = [
+            v["price"] for k, v in quote_ctx["vendors"].items()
+            if k != vendor_10_digit and v["price"] is not None
+        ]
+        if cheaper_others and min(cheaper_others) < price and not vendor["negotiated"]:
+            best_competitor_price = min(cheaper_others)
+            vendor["negotiated"] = True
+            send_whatsapp_text_reply(
+                vendor["phone"],
+                f"Dhanyavaad. Ek aur workshop ₹{best_competitor_price:.0f} quote kar raha hai. "
+                f"Kya aap ise match ya better kar sakte hain?"
+            )
+            vendor["status"] = "negotiating"
+            vendor["price"] = price  # provisional, may update on their next reply
+        else:
+            vendor["price"] = price
+            vendor["status"] = "quoted"
+    else:
+        vendor["status"] = "unavailable"
+
+    # Jab sab vendors se final response aa jaye (quoted/unavailable), manager
+    # ko ek saath comparison bhejo.
+    all_done = all(v["status"] in ("quoted", "unavailable") for v in quote_ctx["vendors"].values())
+    if all_done:
+        quoted = [v for v in quote_ctx["vendors"].values() if v["status"] == "quoted" and v["price"]]
+        if quoted:
+            quoted.sort(key=lambda v: v["price"])
+            lines = [f"💰 *Spare Part Price Comparison — {quote_ctx['part_name']}*\n"]
+            for i, v in enumerate(quoted):
+                tag = " ✅ BEST PRICE" if i == 0 else ""
+                lines.append(f"{i+1}. {v['hub_name']}: ₹{v['price']:.0f}{tag}")
+            unavailable = [v["hub_name"] for v in quote_ctx["vendors"].values() if v["status"] == "unavailable"]
+            if unavailable:
+                lines.append(f"\n❌ Not available at: {', '.join(unavailable)}")
+            send_whatsapp_text_reply(MANAGER_WHATSAPP_NUMBER, "\n".join(lines))
+        else:
+            send_whatsapp_text_reply(
+                MANAGER_WHATSAPP_NUMBER,
+                f"⚠️ None of the {len(quote_ctx['vendors'])} nearby vendors had "
+                f"'{quote_ctx['part_name']}' available."
+            )
+        del PENDING_QUOTES[incident_id]
+
+    return True
 
 
 def _generate_ai_diagnosis(issue_type: str) -> Optional[Dict[str, str]]:
@@ -755,6 +972,15 @@ class EnterpriseAgenticRAGOrchestrator:
         # 5. Multi-Modal Vision Analysis
         vision_report = self._run_multi_modal_vision_inspection()
 
+        # Feature: Spare-Part Price Comparison — ask top 3 nearby vendors for
+        # availability/price on this specific part. Their WhatsApp replies
+        # get picked up later in the webhook handler.
+        _request_spare_part_quotes(
+            self.incident_id,
+            service_intel.get("hub_records", []),
+            rag_intel["recommended_part"]
+        )
+
         detected_hubs = service_intel.get("all_detected_hubs", [])
         assigned_phone = MANAGER_WHATSAPP_NUMBER
 
@@ -975,6 +1201,50 @@ async def whatsapp_webhook(request: Request):
             raw_sender_phone = msg.get("from", "")
             sender_10_digit = ''.join(filter(str.isdigit, raw_sender_phone))[-10:]
             
+            if msg.get("type") == "audio":
+                media_id = msg["audio"].get("id")
+                mime_type = msg["audio"].get("mime_type", "audio/ogg").split(";")[0]
+                audio_bytes = _download_whatsapp_media(media_id) if media_id else None
+
+                if not audio_bytes:
+                    send_whatsapp_text_reply(raw_sender_phone, "⚠️ Voice note download nahi ho paya, kripya dobara bhejein ya type karke bhejein.")
+                    return {"status": "error", "action": "Voice note download failed."}
+
+                transcribed = _transcribe_voice_note(audio_bytes, mime_type)
+                if not transcribed:
+                    send_whatsapp_text_reply(raw_sender_phone, "⚠️ Voice note samajh nahi paya, kripya thoda clear bol ke dobara bhejein.")
+                    return {"status": "error", "action": "Voice note transcription failed."}
+
+                vehicle_id = transcribed["vehicle_id"]
+                if vehicle_id == "UNKNOWN":
+                    vehicle_id = DRIVER_PHONE_TO_VEHICLE.get(sender_10_digit, "UNKNOWN")
+
+                if vehicle_id == "UNKNOWN":
+                    send_whatsapp_text_reply(
+                        raw_sender_phone,
+                        f"🎙️ Sunaayi diya: \"{transcribed['issue_type']}\"\n\n"
+                        f"Vehicle number pata nahi chala — kripya vehicle number bhi bol/likh ke bhejein."
+                    )
+                    return {"status": "success", "action": "Voice note transcribed, vehicle ID missing."}
+
+                voice_incident = IncidentInput(
+                    vehicle_id=vehicle_id,
+                    location=transcribed["location"] if transcribed["location"] != "UNKNOWN" else "Location not specified",
+                    issue_type=transcribed["issue_type"],
+                    severity="MODERATE",
+                    cargo_type="Not specified"
+                )
+                send_whatsapp_text_reply(
+                    raw_sender_phone,
+                    f"🎙️ Voice note samajh liya:\n"
+                    f"🚜 Vehicle: {vehicle_id}\n"
+                    f"📍 Location: {voice_incident.location}\n"
+                    f"🛠️ Issue: {transcribed['issue_type']}\n\n"
+                    f"Processing shuru ho gaya hai, manager ko turant alert milega."
+                )
+                EnterpriseAgenticRAGOrchestrator(voice_incident).run_swarm()
+                return {"status": "success", "action": "Incident auto-created from voice note."}
+
             if msg.get("type") == "interactive":
                 button_reply = msg["interactive"].get("button_reply", {})
                 payload_id = button_reply.get("id", "")
@@ -1062,6 +1332,16 @@ async def whatsapp_webhook(request: Request):
             
             elif msg.get("type") == "text":
                 text_body = msg["text"].get("body", "")
+
+                # First check: is this a reply from a spare-part vendor we
+                # sent a quote request to? If so, handle it separately from
+                # normal driver/manager chat.
+                for inc_id, quote_ctx in list(PENDING_QUOTES.items()):
+                    if sender_10_digit in quote_ctx["vendors"]:
+                        _handle_vendor_quote_reply(inc_id, sender_10_digit, text_body)
+                        send_whatsapp_text_reply(raw_sender_phone, "Dhanyavaad, jaankari mil gayi hai.")
+                        return {"status": "success", "action": "Vendor quote reply processed."}
+
                 matched_inc_id = None
                 for phone, inc_id in INCIDENT_CONTEXTS.items():
                     reg_10_digit = ''.join(filter(str.isdigit, phone))[-10:]
