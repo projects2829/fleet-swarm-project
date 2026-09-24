@@ -87,8 +87,8 @@ MANAGER_WHATSAPP_NUMBER = "+916209313108"
 # real nearby vendors that Google Places finds for each incident. No other
 # code change needed.
 TEST_VENDOR_NUMBERS = [
-    {"name": "Test Vendor 1", "phone": "+918210002439"},
-     {"name": "Test Vendor 2", "phone": "+917759034474"},
+    # {"name": "Test Vendor 1", "phone": "+91XXXXXXXXXX"},
+    # {"name": "Test Vendor 2", "phone": "+91XXXXXXXXXX"},
 ]
 
 # Fleet Unit ID to WhatsApp Number mapping
@@ -531,10 +531,14 @@ def _extract_price_from_reply(vendor_text: str) -> Optional[Dict[str, Any]]:
             f"gemini-flash-latest:generateContent?key={GEMINI_API_KEY}"
         )
         prompt = (
-            "A spare-parts vendor in India replied to a price enquiry. Their message:\n\n"
+            "A spare-parts vendor in India replied to a price enquiry (possibly across "
+            "multiple short messages, shown combined below). Their message(s):\n\n"
             f"\"{vendor_text}\"\n\n"
             "Respond ONLY with strict JSON, no markdown, no preamble:\n"
-            '{"available": true/false, "price_inr": <number or null if not mentioned>}'
+            '{"available": true/false/null, "price_inr": <number or null>}\n'
+            "Rules: available=false ONLY if they clearly said it's not available/out of "
+            "stock. available=true if they confirmed availability (even without a price "
+            "yet, e.g. just \"yes\"). available=null if genuinely unclear."
         )
         body = {"contents": [{"parts": [{"text": prompt}]}]}
         resp = requests.post(url, json=body, timeout=10)
@@ -550,6 +554,43 @@ def _extract_price_from_reply(vendor_text: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def send_vendor_choice_buttons(incident_id: str, quoted: List[Dict[str, Any]], part_name: str):
+    """Manager ko sirf text nahi, balki tap-karke-choose-karne wale buttons
+    bhejta hai — jo bhi vendor choose kare, uska price+details driver tak
+    automatically forward ho jaata hai."""
+    cleaned_phone = re.sub(r'\D', '', MANAGER_WHATSAPP_NUMBER or "")
+    body_lines = [f"💰 *Spare Part Price Comparison*\n*Part:* {part_name}\n"]
+    buttons = []
+    for i, v in enumerate(quoted[:3]):
+        tag = " ✅ Best" if i == 0 else ""
+        body_lines.append(f"{i+1}. {v['hub_name']}: ₹{v['price']:.0f}{tag}")
+        buttons.append({
+            "type": "reply",
+            "reply": {
+                "id": f"PICKVENDOR_{incident_id}_{v['vendor_key']}",
+                "title": f"₹{v['price']:.0f} - {v['hub_name'][:15]}"
+            }
+        })
+    body_lines.append("\nKaunsa vendor choose karna hai?")
+
+    if WHATSAPP_TOKEN and WHATSAPP_TOKEN != "YOUR_TOKEN":
+        url = f"https://graph.facebook.com/v26.0/{WHATSAPP_PHONE_ID}/messages"
+        headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
+        body = {
+            "messaging_product": "whatsapp",
+            "to": cleaned_phone,
+            "type": "interactive",
+            "interactive": {
+                "type": "button",
+                "body": {"text": "\n".join(body_lines)},
+                "action": {"buttons": buttons}
+            }
+        }
+        requests.post(url, json=body, headers=headers, timeout=10)
+    else:
+        print(f"[simulated] Vendor choice buttons to manager: {body_lines}")
+
+
 def _handle_vendor_quote_reply(incident_id: str, vendor_10_digit: str, text_body: str) -> bool:
     """Ek vendor ka reply process karta hai: price nikaalta hai, zaroorat par
     ek round negotiate karta hai, aur jab sab quotes aa jayein to manager ko
@@ -560,11 +601,20 @@ def _handle_vendor_quote_reply(incident_id: str, vendor_10_digit: str, text_body
         return False
 
     vendor = quote_ctx["vendors"][vendor_10_digit]
-    parsed = _extract_price_from_reply(text_body)
+
+    # Vendor often replies in multiple short messages ("YES" then "10000 RS"
+    # separately) — accumulate them and judge the FULL conversation so far,
+    # not each message in isolation, so a bare "YES" is never misread as
+    # "unavailable" just because it didn't contain a price yet.
+    vendor["reply_buffer"] = (vendor.get("reply_buffer", "") + " " + text_body).strip()
+    parsed = _extract_price_from_reply(vendor["reply_buffer"])
     if not parsed:
+        PENDING_QUOTES[incident_id] = quote_ctx
         return True
 
-    if parsed.get("available") and parsed.get("price_inr"):
+    if parsed.get("available") is False:
+        vendor["status"] = "unavailable"
+    elif parsed.get("price_inr"):
         price = float(parsed["price_inr"])
 
         # Ek round negotiation: agar koi doosra vendor sasta quote de chuka hai
@@ -588,7 +638,11 @@ def _handle_vendor_quote_reply(incident_id: str, vendor_10_digit: str, text_body
             vendor["price"] = price
             vendor["status"] = "quoted"
     else:
-        vendor["status"] = "unavailable"
+        # Available but no price yet ("YES" alone) — stay "waiting", do NOT
+        # mark unavailable. The next message from this vendor will likely
+        # have the price, and reply_buffer already keeps context for it.
+        PENDING_QUOTES[incident_id] = quote_ctx
+        return True
 
     # Explicit re-save: with a persistent (SQLite-backed) store, .get() returns
     # a deserialized copy, not a live reference — mutations above won't stick
@@ -597,27 +651,25 @@ def _handle_vendor_quote_reply(incident_id: str, vendor_10_digit: str, text_body
     PENDING_QUOTES[incident_id] = quote_ctx
 
     # Jab sab vendors se final response aa jaye (quoted/unavailable), manager
-    # ko ek saath comparison bhejo.
+    # ko choose-karne-wale buttons bhejo.
     all_done = all(v["status"] in ("quoted", "unavailable") for v in quote_ctx["vendors"].values())
-    if all_done:
-        quoted = [v for v in quote_ctx["vendors"].values() if v["status"] == "quoted" and v["price"]]
+    if all_done and not quote_ctx.get("manager_notified"):
+        quoted = [
+            {**v, "vendor_key": k} for k, v in quote_ctx["vendors"].items()
+            if v["status"] == "quoted" and v["price"]
+        ]
         if quoted:
             quoted.sort(key=lambda v: v["price"])
-            lines = [f"💰 *Spare Part Price Comparison — {quote_ctx['part_name']}*\n"]
-            for i, v in enumerate(quoted):
-                tag = " ✅ BEST PRICE" if i == 0 else ""
-                lines.append(f"{i+1}. {v['hub_name']}: ₹{v['price']:.0f}{tag}")
-            unavailable = [v["hub_name"] for v in quote_ctx["vendors"].values() if v["status"] == "unavailable"]
-            if unavailable:
-                lines.append(f"\n❌ Not available at: {', '.join(unavailable)}")
-            send_whatsapp_text_reply(MANAGER_WHATSAPP_NUMBER, "\n".join(lines))
+            send_vendor_choice_buttons(incident_id, quoted, quote_ctx["part_name"])
+            quote_ctx["manager_notified"] = True
+            PENDING_QUOTES[incident_id] = quote_ctx  # keep alive until manager picks one
         else:
             send_whatsapp_text_reply(
                 MANAGER_WHATSAPP_NUMBER,
                 f"⚠️ None of the {len(quote_ctx['vendors'])} nearby vendors had "
                 f"'{quote_ctx['part_name']}' available."
             )
-        del PENDING_QUOTES[incident_id]
+            del PENDING_QUOTES[incident_id]
 
     return True
 
@@ -1446,6 +1498,47 @@ async def whatsapp_webhook(request: Request):
                 button_reply = msg["interactive"].get("button_reply", {})
                 payload_id = button_reply.get("id", "")
                 
+                if "PICKVENDOR_" in payload_id:
+                    # payload shape: PICKVENDOR_<incident_id>_<vendor_10_digit>
+                    remainder = payload_id.split("PICKVENDOR_")[1]
+                    inc_id, vendor_key = remainder.rsplit("_", 1)
+
+                    quote_ctx = PENDING_QUOTES.get(inc_id)
+                    vendor = quote_ctx["vendors"].get(vendor_key) if quote_ctx else None
+
+                    if not vendor:
+                        send_whatsapp_text_reply(raw_sender_phone, "⚠️ Ye quote ab valid nahi hai (expire ho gaya).")
+                        return {"status": "error", "action": "Vendor quote not found or expired."}
+
+                    incident_ctx = INCIDENT_DETAILS.get(inc_id, {})
+                    vehicle_id = incident_ctx.get("vehicle_id")
+                    part_name = quote_ctx["part_name"]
+
+                    send_whatsapp_text_reply(
+                        raw_sender_phone,
+                        f"✅ Confirmed: {vendor['hub_name']} — ₹{vendor['price']:.0f} for {part_name}."
+                    )
+
+                    driver_phone = DRIVER_WHATSAPP_MAPPING.get(vehicle_id)
+                    if driver_phone:
+                        send_whatsapp_text_reply(
+                            driver_phone,
+                            f"🔧 *Spare Part Approved*\n\n"
+                            f"🚜 *Vehicle:* {vehicle_id}\n"
+                            f"⚙️ *Part:* {part_name}\n"
+                            f"🏢 *Vendor:* {vendor['hub_name']}\n"
+                            f"💰 *Approved Price:* ₹{vendor['price']:.0f}\n\n"
+                            f"Ye part yahi se collect/deliver karwa lijiye."
+                        )
+                    else:
+                        send_whatsapp_text_reply(
+                            MANAGER_WHATSAPP_NUMBER,
+                            f"⚠️ Vendor confirm ho gaya lekin {vehicle_id} ka driver number map nahi mila — manually inform karein."
+                        )
+
+                    del PENDING_QUOTES[inc_id]
+                    return {"status": "success", "action": f"Vendor {vendor['hub_name']} confirmed, driver notified."}
+
                 if "APPROVE_" in payload_id:
                     inc_id = payload_id.split("APPROVE_")[1]
                     APPROVAL_STATES[inc_id] = "APPROVED_AND_DISPATCHED"
@@ -1586,6 +1679,18 @@ async def whatsapp_webhook(request: Request):
 @app.get("/api/health")
 async def health_check():
     return {"status": "online", "engine": "Enterprise Agentic AI RAG & Swarm Orchestrator v5.0.0-GoogleLevel"}
+
+@app.get("/api/debug-api-key")
+async def debug_api_key(x_api_key: Optional[str] = Header(None)):
+    """Temporary debug endpoint — helps diagnose X-API-Key mismatches
+    (typos, extra spaces/quotes) WITHOUT exposing either key's actual value."""
+    return {
+        "fleet_api_key_set_on_server": bool(FLEET_API_KEY),
+        "fleet_api_key_length_on_server": len(FLEET_API_KEY) if FLEET_API_KEY else 0,
+        "received_x_api_key_header": x_api_key is not None,
+        "received_key_length": len(x_api_key) if x_api_key else 0,
+        "keys_match": bool(FLEET_API_KEY) and x_api_key == FLEET_API_KEY
+    }
 
 @app.get("/api/test-gemini")
 async def test_gemini():
