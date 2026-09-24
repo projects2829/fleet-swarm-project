@@ -4,6 +4,7 @@ import uuid
 import re
 import json
 import sqlite3
+import threading
 import collections.abc
 import hashlib
 from typing import List, Dict, Any, Optional
@@ -87,8 +88,8 @@ MANAGER_WHATSAPP_NUMBER = "+916209313108"
 # real nearby vendors that Google Places finds for each incident. No other
 # code change needed.
 TEST_VENDOR_NUMBERS = [
-     {"name": "Test Vendor 1", "phone": "+918210002439"},
-     
+    {"name": "Test Vendor 1", "phone": "+917759034474"},
+    # {"name": "Test Vendor 2", "phone": "+91XXXXXXXXXX"},
 ]
 
 # Fleet Unit ID to WhatsApp Number mapping
@@ -482,7 +483,8 @@ def _request_spare_part_quotes(incident_id: str, hub_records: List[Dict[str, Any
         "vendors": {
             ''.join(filter(str.isdigit, t["phone"]))[-10:]: {
                 "hub_name": t["name"], "phone": t["phone"],
-                "status": "waiting", "price": None, "negotiated": False
+                "status": "waiting", "price": None, "negotiated": False,
+                "awaiting_cost": False
             }
             for t in targets
         }
@@ -490,20 +492,14 @@ def _request_spare_part_quotes(incident_id: str, hub_records: List[Dict[str, Any
 
     failed_vendors = []
     for t in targets:
-        result = send_whatsapp_text_reply(
-            t["phone"],
-            f"🔧 *Fleet Parts Enquiry*\n\n"
-            f"Namaste, kya aapke paas ye part available hai?\n"
-            f"*Part:* {part_name}\n\n"
-            f"Kripya reply karein: availability aur best price ke saath. Dhanyavaad!"
-        )
+        vendor_key = ''.join(filter(str.isdigit, t["phone"]))[-10:]
+        result = send_vendor_availability_buttons(t["phone"], incident_id, vendor_key, part_name)
         delivery_failed = (
             result.get("status") == "error"
-            or (result.get("status_code") is not None and result.get("status_code") != 200)
+            or result.get("delivery_failed") is True
         )
         if delivery_failed:
             failed_vendors.append(t["name"])
-            vendor_key = ''.join(filter(str.isdigit, t["phone"]))[-10:]
             quote_ctx = PENDING_QUOTES[incident_id]
             quote_ctx["vendors"].pop(vendor_key, None)
             PENDING_QUOTES[incident_id] = quote_ctx
@@ -519,6 +515,83 @@ def _request_spare_part_quotes(incident_id: str, hub_records: List[Dict[str, Any
 
     if not PENDING_QUOTES.get(incident_id, {}).get("vendors"):
         PENDING_QUOTES.pop(incident_id, None)
+        return
+
+    # Safety-net: manager gets whatever quotes are ready 40s after the
+    # enquiry goes out, even if not every vendor has replied yet — so
+    # "one vendor added, one vendor answered" cases never sit unnotified.
+    threading.Timer(40.0, _finalize_quotes_after_timeout, args=[incident_id]).start()
+
+
+def send_vendor_availability_buttons(vendor_phone: str, incident_id: str, vendor_10_digit: str, part_name: str):
+    """Vendor ko free-text ki jagah tap-karke-choose-karne wale Yes/No buttons
+    bhejta hai availability ke liye — isse Gemini-based natural-language
+    parsing par depend nahi karna padta (jo GEMINI_API_KEY na hone ya
+    ambiguous replies ki wajah se silently fail ho sakta tha)."""
+    cleaned_phone = ''.join(filter(str.isdigit, vendor_phone))
+    body_text = (
+        f"🔧 *Fleet Parts Enquiry*\n\n"
+        f"Namaste, kya aapke paas ye part available hai?\n"
+        f"*Part:* {part_name}"
+    )
+    buttons = [
+        {"type": "reply", "reply": {"id": f"VENDORAVAIL_YES_{incident_id}_{vendor_10_digit}", "title": "✅ Yes, available"}},
+        {"type": "reply", "reply": {"id": f"VENDORAVAIL_NO_{incident_id}_{vendor_10_digit}", "title": "❌ Not available"}}
+    ]
+    if WHATSAPP_TOKEN and WHATSAPP_TOKEN != "YOUR_TOKEN":
+        url = f"https://graph.facebook.com/v26.0/{WHATSAPP_PHONE_ID}/messages"
+        headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
+        body = {
+            "messaging_product": "whatsapp",
+            "to": cleaned_phone,
+            "type": "interactive",
+            "interactive": {
+                "type": "button",
+                "body": {"text": body_text},
+                "action": {"buttons": buttons}
+            }
+        }
+        try:
+            res = requests.post(url, json=body, headers=headers, timeout=10)
+            print(f"DEBUG VENDOR AVAIL BUTTON RESPONSE [{res.status_code}]:", res.text)
+            return {"status_code": res.status_code, "delivery_failed": res.status_code != 200}
+        except Exception as e:
+            print(f"DEBUG VENDOR AVAIL BUTTON EXCEPTION: {str(e)}")
+            return {"status": "error", "details": str(e)}
+    else:
+        print(f"[simulated] Vendor availability buttons to {vendor_phone}: {body_text}")
+        return {"status": "simulated_reply"}
+
+
+def _notify_manager_with_quotes(incident_id: str) -> bool:
+    """Ready ho chuke vendor quotes manager ko choose-buttons ke roop me
+    bhejta hai. True return karta hai sirf jab kuch actually bheja gaya ho —
+    is se all_done-trigger aur 40s-timeout dono isi ek jagah se manager ko
+    notify karte hain, duplicate logic nahi."""
+    quote_ctx = PENDING_QUOTES.get(incident_id)
+    if not quote_ctx or quote_ctx.get("manager_notified"):
+        return False
+    quoted = [
+        {**v, "vendor_key": k} for k, v in quote_ctx["vendors"].items()
+        if v["status"] == "quoted" and v.get("price")
+    ]
+    if not quoted:
+        return False
+    quoted.sort(key=lambda v: v["price"])
+    send_vendor_choice_buttons(incident_id, quoted, quote_ctx["part_name"])
+    quote_ctx["manager_notified"] = True
+    PENDING_QUOTES[incident_id] = quote_ctx
+    return True
+
+
+def _finalize_quotes_after_timeout(incident_id: str):
+    """40 second ke baad chalta hai (background thread se) — jo bhi quotes
+    us waqt tak ready hain, unhe manager ko bhej deta hai, baaki vendors
+    baad me reply karein to woh apne aap all_done path se handle ho jaayega."""
+    try:
+        _notify_manager_with_quotes(incident_id)
+    except Exception as e:
+        print(f"DEBUG QUOTE TIMEOUT ERROR: {str(e)}")
 
 
 def _extract_price_from_reply(vendor_text: str) -> Optional[Dict[str, Any]]:
@@ -592,57 +665,51 @@ def send_vendor_choice_buttons(incident_id: str, quoted: List[Dict[str, Any]], p
 
 
 def _handle_vendor_quote_reply(incident_id: str, vendor_10_digit: str, text_body: str) -> bool:
-    """Ek vendor ka reply process karta hai: price nikaalta hai, zaroorat par
-    ek round negotiate karta hai, aur jab sab quotes aa jayein to manager ko
-    comparison bhejta hai. True return karta hai agar ye genuinely ek vendor
-    reply tha (taaki caller ise normal driver-chat se confuse na kare)."""
+    """Vendor Yes button dabane ke baad price ka number bhejta hai — ye
+    function sirf usi cost-reply ko handle karta hai (regex se digit nikaal
+    ke), Gemini par depend nahi karta, isliye availability-parsing wali
+    purani ambiguity/silent-failure ab possible nahi hai. False return
+    karta hai agar vendor ne abhi Yes/No button hi nahi dabaya (taaki caller
+    is text ko normal driver-chat se confuse na kare)."""
     quote_ctx = PENDING_QUOTES.get(incident_id)
     if not quote_ctx or vendor_10_digit not in quote_ctx["vendors"]:
         return False
 
     vendor = quote_ctx["vendors"][vendor_10_digit]
 
-    # Vendor often replies in multiple short messages ("YES" then "10000 RS"
-    # separately) — accumulate them and judge the FULL conversation so far,
-    # not each message in isolation, so a bare "YES" is never misread as
-    # "unavailable" just because it didn't contain a price yet.
-    vendor["reply_buffer"] = (vendor.get("reply_buffer", "") + " " + text_body).strip()
-    parsed = _extract_price_from_reply(vendor["reply_buffer"])
-    if not parsed:
-        PENDING_QUOTES[incident_id] = quote_ctx
+    if not vendor.get("awaiting_cost"):
+        # Vendor ne Yes/No button nahi dabaya — is text ko ignore karo.
+        return False
+
+    digits = re.findall(r'\d[\d,]*', text_body)
+    if not digits:
+        send_whatsapp_text_reply(vendor["phone"], "Kripya sirf price number bhejein (jaise: 10000).")
         return True
 
-    if parsed.get("available") is False:
-        vendor["status"] = "unavailable"
-    elif parsed.get("price_inr"):
-        price = float(parsed["price_inr"])
+    price = float(max(digits, key=lambda d: len(d.replace(",", ""))).replace(",", ""))
 
-        # Ek round negotiation: agar koi doosra vendor sasta quote de chuka hai
-        # aur is vendor se abhi negotiate nahi kiya, to AI khud ek counter-offer
-        # bhej deta hai — manager ko intervene nahi karna padta.
-        cheaper_others = [
-            v["price"] for k, v in quote_ctx["vendors"].items()
-            if k != vendor_10_digit and v["price"] is not None
-        ]
-        if cheaper_others and min(cheaper_others) < price and not vendor["negotiated"]:
-            best_competitor_price = min(cheaper_others)
-            vendor["negotiated"] = True
-            send_whatsapp_text_reply(
-                vendor["phone"],
-                f"Dhanyavaad. Ek aur workshop ₹{best_competitor_price:.0f} quote kar raha hai. "
-                f"Kya aap ise match ya better kar sakte hain?"
-            )
-            vendor["status"] = "negotiating"
-            vendor["price"] = price  # provisional, may update on their next reply
-        else:
-            vendor["price"] = price
-            vendor["status"] = "quoted"
+    # Ek round negotiation: agar koi doosra vendor sasta quote de chuka hai
+    # aur is vendor se abhi negotiate nahi kiya, to AI khud ek counter-offer
+    # bhej deta hai — manager ko intervene nahi karna padta.
+    cheaper_others = [
+        v["price"] for k, v in quote_ctx["vendors"].items()
+        if k != vendor_10_digit and v["price"] is not None
+    ]
+    if cheaper_others and min(cheaper_others) < price and not vendor.get("negotiated"):
+        best_competitor_price = min(cheaper_others)
+        vendor["negotiated"] = True
+        vendor["awaiting_cost"] = True
+        send_whatsapp_text_reply(
+            vendor["phone"],
+            f"Dhanyavaad. Ek aur workshop ₹{best_competitor_price:.0f} quote kar raha hai. "
+            f"Kya aap ise match ya better kar sakte hain? Kripya number bhejein."
+        )
+        vendor["status"] = "negotiating"
+        vendor["price"] = price  # provisional, may update on their next reply
     else:
-        # Available but no price yet ("YES" alone) — stay "waiting", do NOT
-        # mark unavailable. The next message from this vendor will likely
-        # have the price, and reply_buffer already keeps context for it.
-        PENDING_QUOTES[incident_id] = quote_ctx
-        return True
+        vendor["price"] = price
+        vendor["status"] = "quoted"
+        vendor["awaiting_cost"] = False
 
     # Explicit re-save: with a persistent (SQLite-backed) store, .get() returns
     # a deserialized copy, not a live reference — mutations above won't stick
@@ -651,19 +718,11 @@ def _handle_vendor_quote_reply(incident_id: str, vendor_10_digit: str, text_body
     PENDING_QUOTES[incident_id] = quote_ctx
 
     # Jab sab vendors se final response aa jaye (quoted/unavailable), manager
-    # ko choose-karne-wale buttons bhejo.
+    # ko choose-karne-wale buttons abhi hi bhejo (40s timer ka wait nahi
+    # karna padega) — is se single-vendor case turant handle ho jaata hai.
     all_done = all(v["status"] in ("quoted", "unavailable") for v in quote_ctx["vendors"].values())
     if all_done and not quote_ctx.get("manager_notified"):
-        quoted = [
-            {**v, "vendor_key": k} for k, v in quote_ctx["vendors"].items()
-            if v["status"] == "quoted" and v["price"]
-        ]
-        if quoted:
-            quoted.sort(key=lambda v: v["price"])
-            send_vendor_choice_buttons(incident_id, quoted, quote_ctx["part_name"])
-            quote_ctx["manager_notified"] = True
-            PENDING_QUOTES[incident_id] = quote_ctx  # keep alive until manager picks one
-        else:
+        if not _notify_manager_with_quotes(incident_id):
             send_whatsapp_text_reply(
                 MANAGER_WHATSAPP_NUMBER,
                 f"⚠️ None of the {len(quote_ctx['vendors'])} nearby vendors had "
@@ -1497,7 +1556,47 @@ async def whatsapp_webhook(request: Request):
             if msg.get("type") == "interactive":
                 button_reply = msg["interactive"].get("button_reply", {})
                 payload_id = button_reply.get("id", "")
-                
+
+                if "VENDORAVAIL_YES_" in payload_id or "VENDORAVAIL_NO_" in payload_id:
+                    # payload shape: VENDORAVAIL_YES_<incident_id>_<vendor_10_digit>
+                    # or VENDORAVAIL_NO_<incident_id>_<vendor_10_digit>
+                    is_yes = "VENDORAVAIL_YES_" in payload_id
+                    prefix = "VENDORAVAIL_YES_" if is_yes else "VENDORAVAIL_NO_"
+                    remainder = payload_id.split(prefix)[1]
+                    inc_id, vendor_key = remainder.rsplit("_", 1)
+
+                    quote_ctx = PENDING_QUOTES.get(inc_id)
+                    vendor = quote_ctx["vendors"].get(vendor_key) if quote_ctx else None
+
+                    if not vendor:
+                        send_whatsapp_text_reply(raw_sender_phone, "⚠️ Ye enquiry ab valid nahi hai (expire ho gayi).")
+                        return {"status": "error", "action": "Vendor quote context not found or expired."}
+
+                    if is_yes:
+                        vendor["awaiting_cost"] = True
+                        PENDING_QUOTES[inc_id] = quote_ctx
+                        send_whatsapp_text_reply(
+                            raw_sender_phone,
+                            "Dhanyavaad! Kripya sirf price number bhejein (jaise: 10000)."
+                        )
+                        return {"status": "success", "action": "Vendor confirmed availability, awaiting cost."}
+                    else:
+                        vendor["status"] = "unavailable"
+                        vendor["awaiting_cost"] = False
+                        PENDING_QUOTES[inc_id] = quote_ctx
+                        send_whatsapp_text_reply(raw_sender_phone, "Dhanyavaad, jaankari mil gayi hai.")
+
+                        all_done = all(v["status"] in ("quoted", "unavailable") for v in quote_ctx["vendors"].values())
+                        if all_done and not quote_ctx.get("manager_notified"):
+                            if not _notify_manager_with_quotes(inc_id):
+                                send_whatsapp_text_reply(
+                                    MANAGER_WHATSAPP_NUMBER,
+                                    f"⚠️ None of the {len(quote_ctx['vendors'])} nearby vendors had "
+                                    f"'{quote_ctx['part_name']}' available."
+                                )
+                                del PENDING_QUOTES[inc_id]
+                        return {"status": "success", "action": "Vendor marked unavailable."}
+
                 if "PICKVENDOR_" in payload_id:
                     # payload shape: PICKVENDOR_<incident_id>_<vendor_10_digit>
                     remainder = payload_id.split("PICKVENDOR_")[1]
@@ -1644,9 +1743,13 @@ async def whatsapp_webhook(request: Request):
                 # normal driver/manager chat.
                 for inc_id, quote_ctx in list(PENDING_QUOTES.items()):
                     if sender_10_digit in quote_ctx["vendors"]:
-                        _handle_vendor_quote_reply(inc_id, sender_10_digit, text_body)
-                        send_whatsapp_text_reply(raw_sender_phone, "Dhanyavaad, jaankari mil gayi hai.")
-                        return {"status": "success", "action": "Vendor quote reply processed."}
+                        handled = _handle_vendor_quote_reply(inc_id, sender_10_digit, text_body)
+                        if handled:
+                            send_whatsapp_text_reply(raw_sender_phone, "Dhanyavaad, jaankari mil gayi hai.")
+                            return {"status": "success", "action": "Vendor quote reply processed."}
+                        else:
+                            send_whatsapp_text_reply(raw_sender_phone, "Kripya upar diye gaye Yes/No button par tap karein.")
+                            return {"status": "success", "action": "Vendor text ignored - awaiting button press."}
 
                 matched_inc_id = None
                 for phone, inc_id in INCIDENT_CONTEXTS.items():
