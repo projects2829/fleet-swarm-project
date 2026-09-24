@@ -32,7 +32,7 @@ function App() {
     try {
       const res = await fetch(`${API_URL}/api/triage`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-API-Key': 'abhi123secretkey456' },
         body: JSON.stringify(formData)
       });
 
@@ -97,7 +97,7 @@ function App() {
     try {
       const res = await fetch(`${API_URL}/api/send-whatsapp-interactive`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-API-Key': 'abhi123secretkey456' },
         body: JSON.stringify({
           incident_id: responseResult.incident_id,
           phone: responseResult.assigned_whatsapp_number,
