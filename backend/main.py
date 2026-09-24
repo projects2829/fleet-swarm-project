@@ -3,9 +3,12 @@ import time
 import uuid
 import re
 import json
+import sqlite3
+import collections.abc
+import hashlib
 from typing import List, Dict, Any, Optional
 import requests
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -14,6 +17,53 @@ from advanced.hybrid_search import HybridSearchEngine
 from advanced.self_rag import grade_hallucination
 from advanced.observability import traced, TraceContext
 from advanced.multimodal import identify_damaged_part
+
+# ==========================================
+# PERSISTENCE LAYER — SQLite-backed dict replacement.
+# Every APPROVAL_STATES[x] = y / INCIDENT_DETAILS.get(x) / del PENDING_QUOTES[x]
+# call elsewhere in this file keeps working UNCHANGED — this is a drop-in
+# MutableMapping, not a new API. Fixes: all incident/approval/quote state was
+# previously plain in-memory dicts, wiped on every Render restart/redeploy.
+# ==========================================
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fleet_state.db")
+
+
+class PersistentDict(collections.abc.MutableMapping):
+    def __init__(self, table_name: str):
+        self.table = table_name
+        self._conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        self._conn.execute(f"CREATE TABLE IF NOT EXISTS {self.table} (key TEXT PRIMARY KEY, value TEXT)")
+        self._conn.commit()
+
+    def __getitem__(self, key):
+        row = self._conn.execute(f"SELECT value FROM {self.table} WHERE key=?", (key,)).fetchone()
+        if row is None:
+            raise KeyError(key)
+        return json.loads(row[0])
+
+    def __setitem__(self, key, value):
+        self._conn.execute(
+            f"INSERT INTO {self.table} (key, value) VALUES (?, ?) "
+            f"ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, json.dumps(value))
+        )
+        self._conn.commit()
+
+    def __delitem__(self, key):
+        cur = self._conn.execute(f"DELETE FROM {self.table} WHERE key=?", (key,))
+        self._conn.commit()
+        if cur.rowcount == 0:
+            raise KeyError(key)
+
+    def __iter__(self):
+        return iter(r[0] for r in self._conn.execute(f"SELECT key FROM {self.table}").fetchall())
+
+    def __len__(self):
+        return self._conn.execute(f"SELECT COUNT(*) FROM {self.table}").fetchone()[0]
+
+    def __contains__(self, key):
+        return self._conn.execute(f"SELECT 1 FROM {self.table} WHERE key=?", (key,)).fetchone() is not None
+
 
 app = FastAPI(title="Autonomous Enterprise Fleet Agentic AI & RAG Engine", version="5.0.0-GoogleLevel")
 
@@ -37,8 +87,8 @@ MANAGER_WHATSAPP_NUMBER = "+916209313108"
 # real nearby vendors that Google Places finds for each incident. No other
 # code change needed.
 TEST_VENDOR_NUMBERS = [
-     {"name": "Test Vendor 1", "phone": "+917759034474"},
-     {"name": "Test Vendor 2", "phone": "+918210002439"},
+    # {"name": "Test Vendor 1", "phone": "+91XXXXXXXXXX"},
+    # {"name": "Test Vendor 2", "phone": "+91XXXXXXXXXX"},
 ]
 
 # Fleet Unit ID to WhatsApp Number mapping
@@ -51,14 +101,16 @@ DRIVER_WHATSAPP_MAPPING = {
 }
 
 # In-memory storage for HITL approval states and active contexts
-APPROVAL_STATES = {}
-INCIDENT_CONTEXTS = {}   # phone -> incident_id
-INCIDENT_DETAILS = {}    # incident_id -> full context dict (for AI replies)
-ACTIVE_VEHICLE_BY_PHONE = {}
+# NOTE: Now SQLite-backed (PersistentDict) instead of plain {} — survives
+# Render restarts/redeploys. Usage elsewhere in this file is unchanged.
+APPROVAL_STATES = PersistentDict("approval_states")
+INCIDENT_CONTEXTS = PersistentDict("incident_contexts")   # phone -> incident_id
+INCIDENT_DETAILS = PersistentDict("incident_details")      # incident_id -> full context dict (for AI replies)
+ACTIVE_VEHICLE_BY_PHONE = PersistentDict("active_vehicle_by_phone")
 
 # Feature: Spare-Part Price Comparison — tracks outstanding quote requests
 # sent to nearby service centers, keyed by incident_id.
-PENDING_QUOTES = {}
+PENDING_QUOTES = PersistentDict("pending_quotes")
 # 10-digit phone -> vehicle_id, reverse of DRIVER_WHATSAPP_MAPPING, so an
 # inbound voice note can be matched to a vehicle without the driver typing it.
 DRIVER_PHONE_TO_VEHICLE = {
@@ -67,6 +119,48 @@ DRIVER_PHONE_TO_VEHICLE = {
 }
 
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
+
+# ==========================================
+# API KEY AUTHENTICATION — protects /api/triage and /api/send-whatsapp-interactive
+# from being hit by anyone on the internet (Gemini/Maps/WhatsApp quota abuse,
+# fake incidents). Set FLEET_API_KEY on Render to enable. If it's NOT set,
+# auth is skipped with a warning (so an unconfigured deploy never silently
+# locks out your own frontend) — set it before going to production.
+# NOTE: does NOT apply to /api/whatsapp-webhook, since that's called by Meta
+# itself using its own verification, not our frontend.
+# ==========================================
+FLEET_API_KEY = os.getenv("FLEET_API_KEY")
+if not FLEET_API_KEY:
+    print("⚠️ [security] FLEET_API_KEY is not set — /api/triage and /api/send-whatsapp-interactive "
+          "are currently OPEN to anyone. Set FLEET_API_KEY on Render to require an API key.")
+
+
+def require_api_key(x_api_key: Optional[str] = Header(None)):
+    if FLEET_API_KEY and x_api_key != FLEET_API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key header.")
+    return True
+
+
+# ==========================================
+# RATE LIMITING — simple in-memory sliding window per client IP. No new
+# dependency required. Protects against abuse/cost-explosion on the paid
+# Gemini/Google Maps/WhatsApp API calls behind these endpoints.
+# ==========================================
+RATE_LIMIT_WINDOW_SECONDS = 60
+RATE_LIMIT_MAX_REQUESTS = 20
+_rate_limit_tracker: Dict[str, List[float]] = {}
+
+
+def rate_limit(request: Request):
+    client_ip = request.client.host if request.client else "unknown"
+    now = time.time()
+    timestamps = _rate_limit_tracker.get(client_ip, [])
+    timestamps = [t for t in timestamps if now - t < RATE_LIMIT_WINDOW_SECONDS]
+    if len(timestamps) >= RATE_LIMIT_MAX_REQUESTS:
+        raise HTTPException(status_code=429, detail="Rate limit exceeded — too many requests, please slow down.")
+    timestamps.append(now)
+    _rate_limit_tracker[client_ip] = timestamps
+    return True
 WHATSAPP_PHONE_ID = os.getenv("PHONE_NUMBER_ID", "1340284595815318")
 VERIFY_TOKEN = "fleet_secret_token_2026"
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
@@ -187,6 +281,38 @@ class AdvancedHybridRAGEngine:
             for doc in self.knowledge_base
         ]
         self._engine = HybridSearchEngine(documents=documents)
+
+    def add_learned_document(self, new_doc: Dict[str, Any]):
+        """Self-Improving Knowledge Base: called when a manager approves an
+        AI-generated (non-manual) diagnosis. Permanently learns it so the
+        next identical/similar issue gets a real, high-confidence manual
+        match instead of falling back to Gemini again. Rebuilds the LIVE
+        search index immediately (no restart needed) and also writes it to
+        disk so it survives instance restarts.
+        NOTE: on Render's default (no persistent-disk add-on) this file
+        survives restarts but not a fresh redeploy — for guaranteed
+        durability across redeploys, add a Render persistent disk mounted
+        at this path, or move learned docs into the SQLite/Postgres layer."""
+        self.knowledge_base.append(new_doc)
+        documents = [
+            {**doc, "text": f"{doc['content']} {' '.join(doc['keywords'])} Recommended part: {doc['part_code']}"}
+            for doc in self.knowledge_base
+        ]
+        self._engine = HybridSearchEngine(documents=documents)
+
+        os.makedirs(KNOWLEDGE_BASE_DIR, exist_ok=True)
+        auto_learned_path = os.path.join(KNOWLEDGE_BASE_DIR, "auto_learned.json")
+        existing = []
+        if os.path.exists(auto_learned_path):
+            try:
+                with open(auto_learned_path, "r", encoding="utf-8") as f:
+                    existing = json.load(f)
+            except Exception:
+                existing = []
+        existing.append(new_doc)
+        with open(auto_learned_path, "w", encoding="utf-8") as f:
+            json.dump(existing, f, indent=2, ensure_ascii=False)
+        print(f"[self-improving-kb] Learned new document '{new_doc['id']}' — knowledge base now has {len(self.knowledge_base)} docs.")
 
     @traced("hybrid_search_retrieve_and_rerank")
     def hybrid_retrieve_and_rerank(self, issue_type: str) -> Dict[str, Any]:
@@ -378,7 +504,9 @@ def _request_spare_part_quotes(incident_id: str, hub_records: List[Dict[str, Any
         if delivery_failed:
             failed_vendors.append(t["name"])
             vendor_key = ''.join(filter(str.isdigit, t["phone"]))[-10:]
-            PENDING_QUOTES[incident_id]["vendors"].pop(vendor_key, None)
+            quote_ctx = PENDING_QUOTES[incident_id]
+            quote_ctx["vendors"].pop(vendor_key, None)
+            PENDING_QUOTES[incident_id] = quote_ctx
 
     if failed_vendors:
         send_whatsapp_text_reply(
@@ -462,6 +590,12 @@ def _handle_vendor_quote_reply(incident_id: str, vendor_10_digit: str, text_body
     else:
         vendor["status"] = "unavailable"
 
+    # Explicit re-save: with a persistent (SQLite-backed) store, .get() returns
+    # a deserialized copy, not a live reference — mutations above won't stick
+    # unless we write the whole context back, including for partial progress
+    # (not all vendors replied yet).
+    PENDING_QUOTES[incident_id] = quote_ctx
+
     # Jab sab vendors se final response aa jaye (quoted/unavailable), manager
     # ko ek saath comparison bhejo.
     all_done = all(v["status"] in ("quoted", "unavailable") for v in quote_ctx["vendors"].values())
@@ -486,6 +620,27 @@ def _handle_vendor_quote_reply(incident_id: str, vendor_10_digit: str, text_body
         del PENDING_QUOTES[incident_id]
 
     return True
+
+
+def _build_learned_doc_from_incident(incident_ctx: Dict[str, Any]) -> Dict[str, Any]:
+    """Manager-approved AI diagnosis ko ek proper knowledge-base document me
+    convert karta hai — agli baar wahi/similar issue aane par ye manual-grounded
+    high-confidence match banega, Gemini fallback nahi."""
+    issue_type = incident_ctx.get("issue_type", "")
+    raw_words = re.findall(r"[a-zA-Z]{3,}", issue_type.lower())
+    stopwords = {"the", "and", "for", "with", "not", "has", "have", "was", "are"}
+    keywords = list(dict.fromkeys(w for w in raw_words if w not in stopwords))[:10]
+    if not keywords:
+        keywords = [issue_type.lower()[:30]]
+
+    doc_id = "AUTOLEARN-" + hashlib.md5(issue_type.encode("utf-8")).hexdigest()[:8].upper()
+    return {
+        "id": doc_id,
+        "manual": "AI-Learned Diagnosis (Manager-Verified)",
+        "keywords": keywords,
+        "part_code": incident_ctx.get("recommended_part", "Standard Certified Heavy Fleet Repair Kit (Part #FL-GEN-01)"),
+        "content": incident_ctx.get("diagnostic_summary", issue_type)
+    }
 
 
 def _generate_ai_diagnosis(issue_type: str) -> Optional[Dict[str, str]]:
@@ -1038,7 +1193,9 @@ class EnterpriseAgenticRAGOrchestrator:
             "hub_waypoint": service_intel.get("hub_waypoint"),
             "hub_records": service_intel.get("hub_records", []),
             "hub_index": 0,
-            "recommended_part": rag_intel["recommended_part"]
+            "recommended_part": rag_intel["recommended_part"],
+            "hallucination_grade": rag_intel.get("hallucination_grade"),
+            "diagnostic_summary": rag_intel.get("diagnostic_summary", "")
         }
 
         # Agent 1: Triage & Vision Multi-Modal Agent Trace
@@ -1119,7 +1276,7 @@ class EnterpriseAgenticRAGOrchestrator:
         )
 
 @app.post("/api/triage", response_model=TriageResponse)
-async def trigger_triage(incident: IncidentInput):
+async def trigger_triage(incident: IncidentInput, _auth=Depends(require_api_key), _rl=Depends(rate_limit)):
     return EnterpriseAgenticRAGOrchestrator(incident).run_swarm()
 
 @app.get("/api/approval-status/{incident_id}")
@@ -1192,7 +1349,7 @@ def send_whatsapp_interactive_approval(incident_id: str, to_phone: str, vehicle_
 
 
 @app.post("/api/send-whatsapp-interactive")
-async def send_whatsapp_interactive(payload: dict):
+async def send_whatsapp_interactive(payload: dict, _auth=Depends(require_api_key), _rl=Depends(rate_limit)):
     incident_id = payload.get("incident_id")
     raw_phone = payload.get("phone", "")
     vehicle_id = payload.get("vehicle_id")
@@ -1299,6 +1456,22 @@ async def whatsapp_webhook(request: Request):
                     vehicle_id = incident_ctx.get("vehicle_id")
                     hub = incident_ctx.get("hub")
                     recommended_part = incident_ctx.get("recommended_part")
+
+                    # Self-Improving Knowledge Base: this diagnosis was Gemini's
+                    # best guess (no manual matched it) — now that a human has
+                    # verified/approved it, permanently learn it so the SAME
+                    # issue next time gets a real manual-grounded match.
+                    if incident_ctx.get("hallucination_grade") == "AI_GENERATED_FALLBACK":
+                        try:
+                            learned_doc = _build_learned_doc_from_incident(incident_ctx)
+                            GLOBAL_HYBRID_RAG_ENGINE.add_learned_document(learned_doc)
+                            send_whatsapp_text_reply(
+                                MANAGER_WHATSAPP_NUMBER,
+                                f"🧠 Knowledge base updated: learned '{incident_ctx.get('issue_type')}' → "
+                                f"{recommended_part}. Future similar reports will match this directly."
+                            )
+                        except Exception as e:
+                            print(f"DEBUG SELF-LEARNING ERROR: {str(e)}")
                     
                     driver_phone = DRIVER_WHATSAPP_MAPPING.get(vehicle_id)
                     if driver_phone:
