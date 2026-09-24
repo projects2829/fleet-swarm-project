@@ -910,25 +910,32 @@ class TriageResponse(BaseModel):
 
 
 def _resolve_hub_phone(hub_record: dict) -> str:
-    """Static phone (fallback hubs) ya Google Place Details se phone nikaalta hai —
-    kisi bhi hub_record ke liye reusable, sirf primary hub tak limited nahi."""
-    if hub_record.get("phone"):
-        return hub_record["phone"]
-    if hub_record.get("place_id") and GOOGLE_MAPS_API_KEY:
-        try:
-            details_url = "https://maps.googleapis.com/maps/api/place/details/json"
-            details_params = {
-                "place_id": hub_record["place_id"],
-                "fields": "formatted_phone_number,international_phone_number",
-                "key": GOOGLE_MAPS_API_KEY
-            }
-            d_data = requests.get(details_url, params=details_params, timeout=5).json()
-            phone = d_data.get("result", {}).get("formatted_phone_number") or d_data.get("result", {}).get("international_phone_number")
-            if phone:
-                return phone
-        except Exception:
-            pass
-    return "Contact number not available — team will call and share shortly"
+    """Static phone (fallback hubs) ya Google Place Details se phone nikaalta hai.
+
+    TEMPORARY (testing phase): asli hub numbers abhi wire-up nahi hain, isliye
+    sab nearest hubs ka contact number ek hi test number (8210002439) se
+    link kiya gaya hai — jaise hi real hub phone numbers ready hon, ye
+    override hata ke neeche wala Google-Place-Details/fallback logic use
+    karo (uncomment karke)."""
+    return "+91 8210002439"
+    # --- asli logic (abhi disabled) ---
+    # if hub_record.get("phone"):
+    #     return hub_record["phone"]
+    # if hub_record.get("place_id") and GOOGLE_MAPS_API_KEY:
+    #     try:
+    #         details_url = "https://maps.googleapis.com/maps/api/place/details/json"
+    #         details_params = {
+    #             "place_id": hub_record["place_id"],
+    #             "fields": "formatted_phone_number,international_phone_number",
+    #             "key": GOOGLE_MAPS_API_KEY
+    #         }
+    #         d_data = requests.get(details_url, params=details_params, timeout=5).json()
+    #         phone = d_data.get("result", {}).get("formatted_phone_number") or d_data.get("result", {}).get("international_phone_number")
+    #         if phone:
+    #             return phone
+    #     except Exception:
+    #         pass
+    # return "Contact number not available — team will call and share shortly"
 
 
 def send_whatsapp_text_reply(to_phone: str, text: str):
@@ -1444,7 +1451,7 @@ def send_whatsapp_interactive_approval(incident_id: str, to_phone: str, vehicle_
                 "type": "button",
                 "body": {
                     "text": (
-                        f"🚨 *GOOGLE-LEVEL AGENTIC RAG ALERT*\n\n"
+                        f"🚨 *Breakdown Alert — Action Needed*\n\n"
                         f"🚜 *Vehicle:* {vehicle_id} | ⚡ *Sev:* {severity}\n"
                         f"📦 *Cargo:* {cargo_type}\n"
                         f"📍 *Location:* {location}\n"
@@ -1643,14 +1650,20 @@ async def whatsapp_webhook(request: Request):
 
                     driver_phone = DRIVER_WHATSAPP_MAPPING.get(vehicle_id)
                     if driver_phone:
+                        hub_name = incident_ctx.get("hub", "Nearest Service Center")
+                        hub_phone = incident_ctx.get("hub_phone") or "8210002439"
                         send_whatsapp_text_reply(
                             driver_phone,
-                            f"🔧 *Spare Part Approved*\n\n"
+                            f"✅ *Repair & Parts Confirmed*\n\n"
                             f"🚜 *Vehicle:* {vehicle_id}\n"
+                            f"🛠️ *Issue:* {incident_ctx.get('issue_type', 'N/A')}\n"
+                            f"📍 *Your Location:* {incident_ctx.get('location', 'N/A')}\n\n"
+                            f"🏢 *Nearest Service Center:* {hub_name}\n"
+                            f"📞 *Hub Contact:* {hub_phone}\n\n"
                             f"⚙️ *Part:* {part_name}\n"
-                            f"🏢 *Vendor:* {vendor['hub_name']}\n"
+                            f"🏭 *Vendor:* {vendor['hub_name']}\n"
                             f"💰 *Approved Price:* ₹{vendor['price']:.0f}\n\n"
-                            f"Ye part yahi se collect/deliver karwa lijiye."
+                            f"Ye part yahi hub se collect/deliver karwa lijiye. Kisi bhi update ya sawaal ke liye isi chat par likhein."
                         )
                     else:
                         send_whatsapp_text_reply(
