@@ -88,7 +88,7 @@ MANAGER_WHATSAPP_NUMBER = "+916209313108"
 # real nearby vendors that Google Places finds for each incident. No other
 # code change needed.
 TEST_VENDOR_NUMBERS = [
-    {"name": "Test Vendor 1", "phone": "+917759034474"},
+    {"name": "Test Vendor 1", "phone": "+918210002439"},
     # {"name": "Test Vendor 2", "phone": "+91XXXXXXXXXX"},
 ]
 
