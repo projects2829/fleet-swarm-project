@@ -578,7 +578,17 @@ def _notify_manager_with_quotes(incident_id: str) -> bool:
     if not quoted:
         return False
     quoted.sort(key=lambda v: v["price"])
-    send_vendor_choice_buttons(incident_id, quoted, quote_ctx["part_name"])
+    result = send_vendor_choice_buttons(incident_id, quoted, quote_ctx["part_name"])
+    if isinstance(result, dict) and result.get("delivery_failed"):
+        # Interactive buttons na jaa paaye (button-title limit, template
+        # issue, etc.) — manager ko kam se kam plain text me list to milni
+        # chahiye, taaki wo manually reply karke vendor choose kar sake.
+        fallback_lines = [f"💰 *Spare Part Price Comparison*\n*Part:* {quote_ctx['part_name']}\n"]
+        for i, v in enumerate(quoted[:3]):
+            tag = " ✅ Best" if i == 0 else ""
+            fallback_lines.append(f"{i+1}. {v['hub_name']}: ₹{v['price']:.0f}{tag}")
+        fallback_lines.append("\n⚠️ Interactive buttons deliver nahi ho paaye — reply karke bataayein kaunsa vendor (1/2/3) choose karna hai.")
+        send_whatsapp_text_reply(MANAGER_WHATSAPP_NUMBER, "\n".join(fallback_lines))
     quote_ctx["manager_notified"] = True
     PENDING_QUOTES[incident_id] = quote_ctx
     return True
@@ -637,11 +647,15 @@ def send_vendor_choice_buttons(incident_id: str, quoted: List[Dict[str, Any]], p
     for i, v in enumerate(quoted[:3]):
         tag = " ✅ Best" if i == 0 else ""
         body_lines.append(f"{i+1}. {v['hub_name']}: ₹{v['price']:.0f}{tag}")
+        # NOTE: WhatsApp caps interactive reply-button titles at 20 chars —
+        # hub_name isn't included here (it's already shown in body_lines
+        # above), so this always stays short and never gets silently
+        # rejected by Meta the way "₹1250 - Test Vendor 1" (21 chars) did.
         buttons.append({
             "type": "reply",
             "reply": {
                 "id": f"PICKVENDOR_{incident_id}_{v['vendor_key']}",
-                "title": f"₹{v['price']:.0f} - {v['hub_name'][:15]}"
+                "title": f"#{i+1}: ₹{v['price']:.0f}"
             }
         })
     body_lines.append("\nKaunsa vendor choose karna hai?")
@@ -659,9 +673,18 @@ def send_vendor_choice_buttons(incident_id: str, quoted: List[Dict[str, Any]], p
                 "action": {"buttons": buttons}
             }
         }
-        requests.post(url, json=body, headers=headers, timeout=10)
+        try:
+            res = requests.post(url, json=body, headers=headers, timeout=10)
+            print(f"DEBUG VENDOR CHOICE BUTTONS RESPONSE [{res.status_code}]:", res.text)
+            if res.status_code != 200:
+                print(f"⚠️ Meta API Error: Could not deliver vendor-choice buttons to manager.")
+            return {"status_code": res.status_code, "delivery_failed": res.status_code != 200}
+        except Exception as e:
+            print(f"DEBUG VENDOR CHOICE BUTTONS EXCEPTION: {str(e)}")
+            return {"status": "error", "details": str(e)}
     else:
         print(f"[simulated] Vendor choice buttons to manager: {body_lines}")
+        return {"status": "simulated_reply"}
 
 
 def _handle_vendor_quote_reply(incident_id: str, vendor_10_digit: str, text_body: str) -> bool:
