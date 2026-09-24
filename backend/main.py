@@ -88,7 +88,7 @@ MANAGER_WHATSAPP_NUMBER = "+916209313108"
 # real nearby vendors that Google Places finds for each incident. No other
 # code change needed.
 TEST_VENDOR_NUMBERS = [
-    {"name": "Test Vendor 1", "phone": "+918210002439"},
+    {"name": "Test Vendor 1", "phone": "+917759034474"},
     # {"name": "Test Vendor 2", "phone": "+91XXXXXXXXXX"},
 ]
 
@@ -1794,6 +1794,29 @@ async def debug_api_key(x_api_key: Optional[str] = Header(None)):
         "received_key_length": len(x_api_key) if x_api_key else 0,
         "keys_match": bool(FLEET_API_KEY) and x_api_key == FLEET_API_KEY
     }
+
+
+@app.get("/api/debug-pending-quotes")
+async def debug_pending_quotes():
+    """Vendor quote flow ka LIVE state dikhata hai — kaunsa vendor 'waiting'
+    hai, kaunsa 'awaiting_cost', price kya aaya, manager_notified ho chuka
+    ya nahi. Ise hit karke exactly pata chal jaata hai flow kahaan atka hai,
+    bina Render logs khole."""
+    return {
+        "count": len(PENDING_QUOTES),
+        "quotes": {inc_id: ctx for inc_id, ctx in PENDING_QUOTES.items()}
+    }
+
+
+@app.post("/api/debug-clear-pending-quotes")
+async def debug_clear_pending_quotes(_auth=Depends(require_api_key)):
+    """SQLite me persist ho chuki PURANI/stale test quote-contexts ko clear
+    karta hai — fresh testing se pehle isse hit karo taaki koi purana
+    incident state naya test na bigade. Needs X-API-Key."""
+    cleared = list(PENDING_QUOTES.keys())
+    for inc_id in cleared:
+        del PENDING_QUOTES[inc_id]
+    return {"status": "success", "cleared_incident_ids": cleared}
 
 @app.get("/api/test-gemini")
 async def test_gemini():
