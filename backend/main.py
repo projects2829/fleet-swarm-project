@@ -720,19 +720,20 @@ def _handle_vendor_quote_reply(incident_id: str, vendor_10_digit: str, text_body
 
     # Ek round negotiation: agar koi doosra vendor sasta quote de chuka hai
     # aur is vendor se abhi negotiate nahi kiya, to AI khud ek counter-offer
-    # bhej deta hai — manager ko intervene nahi karna padta.
+    # bhej deta hai — manager ko intervene nahi karna padta. Kisi bhi vendor
+    # ka EXACT price doosre vendor ko kabhi disclose nahi karte — sirf itna
+    # bataate hain ki "better rate mil sakta hai", competitor ka number nahi.
     cheaper_others = [
         v["price"] for k, v in quote_ctx["vendors"].items()
         if k != vendor_10_digit and v["price"] is not None
     ]
     if cheaper_others and min(cheaper_others) < price and not vendor.get("negotiated"):
-        best_competitor_price = min(cheaper_others)
         vendor["negotiated"] = True
         vendor["awaiting_cost"] = True
         send_whatsapp_text_reply(
             vendor["phone"],
-            f"Dhanyavaad. Ek aur workshop ₹{best_competitor_price:.0f} quote kar raha hai. "
-            f"Kya aap ise match ya better kar sakte hain? Kripya number bhejein."
+            f"Dhanyavaad. Hume isse better rate mil sakta hai. "
+            f"Kya aap apna price thoda kam kar sakte hain? Kripya number bhejein."
         )
         vendor["status"] = "negotiating"
         vendor["price"] = price  # provisional, may update on their next reply
@@ -1723,11 +1724,6 @@ async def whatsapp_webhook(request: Request):
                     vehicle_id = incident_ctx.get("vehicle_id")
                     part_name = quote_ctx["part_name"]
 
-                    send_whatsapp_text_reply(
-                        raw_sender_phone,
-                        f"✅ Confirmed: {vendor['hub_name']} — ₹{vendor['price']:.0f} for {part_name}."
-                    )
-
                     # Vendor pick hi ab de-facto "approval" hai — isliye yahi
                     # se dispatch state set karo, aur driver ko poora
                     # breakdown+repair+vendor detail ek 'Accept Repair'
@@ -1737,6 +1733,7 @@ async def whatsapp_webhook(request: Request):
                     # ab zaroori nahi.
                     APPROVAL_STATES[inc_id] = "APPROVED_AND_DISPATCHED"
                     driver_phone = _lookup_driver_phone(vehicle_id)
+                    driver_status_note = ""
                     if driver_phone:
                         hub_name = incident_ctx.get("hub", "Nearest Service Center")
                         hub_phone = incident_ctx.get("hub_phone") or "8210002439"
@@ -1754,17 +1751,33 @@ async def whatsapp_webhook(request: Request):
                             f"aur aap isi par live updates/photos share kar sakein."
                         )
                         result = send_driver_accept_repair_button(driver_phone, inc_id, driver_body_text)
-                        if isinstance(result, dict) and result.get("delivery_failed"):
-                            # Button na jaa paaya to kam se kam plain text detail
-                            # driver tak pahunche — silent failure nahi hona chahiye.
-                            send_whatsapp_text_reply(driver_phone, driver_body_text)
-                    else:
-                        send_whatsapp_text_reply(
-                            MANAGER_WHATSAPP_NUMBER,
-                            f"⚠️ Vendor confirm ho gaya lekin {vehicle_id!r} ka driver number "
-                            f"DRIVER_WHATSAPP_MAPPING me nahi mila — manually inform karein. "
-                            f"(Render logs me DEBUG DRIVER LOOKUP FAILED line check karein.)"
+                        # NOTE: pehle sirf "delivery_failed" flag check hota tha —
+                        # agar send_driver_accept_repair_button ke andar exception
+                        # (network/timeout) aata, wo {"status": "error", ...}
+                        # return karta, jisme "delivery_failed" key hoti hi nahi —
+                        # isliye fallback text bhi silently skip ho jaata tha.
+                        # Ab dono cases (non-200 response AND exception) fallback
+                        # trigger karte hain.
+                        send_failed = isinstance(result, dict) and (
+                            result.get("delivery_failed") or result.get("status") == "error"
                         )
+                        if send_failed:
+                            send_whatsapp_text_reply(driver_phone, driver_body_text)
+                            driver_status_note = f"\n\n📲 Driver ({vehicle_id}, {driver_phone}): button fail hua, plain text fallback bheja gaya."
+                        else:
+                            driver_status_note = f"\n\n📲 Driver ({vehicle_id}, {driver_phone}) ko 'Accept Repair' button bhej diya gaya."
+                    else:
+                        driver_status_note = (
+                            f"\n\n⚠️ Driver ko notify NAHI kiya ja saka — vehicle_id={vehicle_id!r} "
+                            f"DRIVER_WHATSAPP_MAPPING me kisi bhi key se match nahi hua. "
+                            f"Available vehicles: {', '.join(DRIVER_WHATSAPP_MAPPING.keys())}"
+                        )
+
+                    send_whatsapp_text_reply(
+                        raw_sender_phone,
+                        f"✅ Confirmed: {vendor['hub_name']} — ₹{vendor['price']:.0f} for {part_name}."
+                        f"{driver_status_note}"
+                    )
 
                     del PENDING_QUOTES[inc_id]
                     return {"status": "success", "action": f"Vendor {vendor['hub_name']} confirmed, driver notified."}
