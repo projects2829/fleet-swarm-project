@@ -88,9 +88,16 @@ MANAGER_WHATSAPP_NUMBER = "+916209313108"
 # real nearby vendors that Google Places finds for each incident. No other
 # code change needed.
 TEST_VENDOR_NUMBERS = [
-    {"name": "Test Vendor 1", "phone": "+918210002439"},
-    # {"name": "Test Vendor 2", "phone": "+91XXXXXXXXXX"},
+    {"name": "Test Vendor 1", "phone": "+917759034474"},
+    {"name": "Test Vendor 2", "phone": "+918210002439"},
 ]
+
+# TESTING PHASE: real nearest-hub contact numbers abhi wire-up nahi hain,
+# isliye har detected hub ko in DO numbers me se cyclically ek assign hota
+# hai (_resolve_hub_phone me index % 2 se). Jaise hi asli hub numbers ready
+# hon, TEST_HUB_NUMBERS ko empty [] kar dena — real Google-Place-Details
+# lookup apne aap wapas use hone lagega.
+TEST_HUB_NUMBERS = ["+917759034474", "+918210002439"]
 
 # Fleet Unit ID to WhatsApp Number mapping
 DRIVER_WHATSAPP_MAPPING = {
@@ -470,8 +477,8 @@ def _request_spare_part_quotes(incident_id: str, hub_records: List[Dict[str, Any
         targets = list(TEST_VENDOR_NUMBERS)
     else:
         targets = []
-        for hub in hub_records[:3]:
-            phone = _resolve_hub_phone(hub)
+        for idx, hub in enumerate(hub_records[:3]):
+            phone = _resolve_hub_phone(hub, idx)
             if phone and "not available" not in phone.lower():
                 targets.append({"name": hub["name"], "phone": phone})
 
@@ -909,33 +916,85 @@ class TriageResponse(BaseModel):
     final_resolution: Dict[str, Any]
 
 
-def _resolve_hub_phone(hub_record: dict) -> str:
+def _lookup_driver_phone(vehicle_id: Optional[str]) -> Optional[str]:
+    """DRIVER_WHATSAPP_MAPPING se phone dhoondta hai — case/whitespace ka
+    farak (jaise 'br01gp9621 ' vs 'BR01GP9621') ab match fail nahi karega.
+    Agar phir bhi na mile, Render logs me exact vehicle_id print ho jaata
+    hai taaki mapping me kya add/fix karna hai turant pata chal jaaye."""
+    if not vehicle_id:
+        print("DEBUG DRIVER LOOKUP: vehicle_id khud hi empty/None hai — incident_ctx me save nahi hua tha.")
+        return None
+    normalized = vehicle_id.strip().upper()
+    for vid, phone in DRIVER_WHATSAPP_MAPPING.items():
+        if vid.strip().upper() == normalized:
+            return phone
+    print(f"DEBUG DRIVER LOOKUP FAILED: vehicle_id={vehicle_id!r} DRIVER_WHATSAPP_MAPPING me kisi key se match nahi hua. "
+          f"Available keys: {list(DRIVER_WHATSAPP_MAPPING.keys())}")
+    return None
+
+
+def send_driver_accept_repair_button(driver_phone: str, incident_id: str, body_text: str):
+    """Driver ko poora breakdown+repair detail ek interactive 'Accept Repair'
+    button ke saath bhejta hai — tap karne par hi driver ka AI agent chat
+    officially enable hota hai (INCIDENT_CONTEXTS map hoti hai)."""
+    cleaned_phone = ''.join(filter(str.isdigit, driver_phone))
+    if WHATSAPP_TOKEN and WHATSAPP_TOKEN != "YOUR_TOKEN":
+        url = f"https://graph.facebook.com/v26.0/{WHATSAPP_PHONE_ID}/messages"
+        headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
+        body = {
+            "messaging_product": "whatsapp",
+            "to": cleaned_phone,
+            "type": "interactive",
+            "interactive": {
+                "type": "button",
+                "body": {"text": body_text},
+                "action": {
+                    "buttons": [
+                        {"type": "reply", "reply": {"id": f"ACCEPTREPAIR_{incident_id}", "title": "Accept Repair ✅"}}
+                    ]
+                }
+            }
+        }
+        try:
+            res = requests.post(url, json=body, headers=headers, timeout=10)
+            print(f"DEBUG DRIVER ACCEPT-REPAIR BUTTON RESPONSE [{res.status_code}]:", res.text)
+            return {"status_code": res.status_code, "delivery_failed": res.status_code != 200}
+        except Exception as e:
+            print(f"DEBUG DRIVER ACCEPT-REPAIR BUTTON EXCEPTION: {str(e)}")
+            return {"status": "error", "details": str(e)}
+    else:
+        print(f"[simulated] Driver accept-repair button to {driver_phone}: {body_text}")
+        return {"status": "simulated_reply"}
+
+
+def _resolve_hub_phone(hub_record: dict, hub_index: int = 0) -> str:
     """Static phone (fallback hubs) ya Google Place Details se phone nikaalta hai.
 
     TEMPORARY (testing phase): asli hub numbers abhi wire-up nahi hain, isliye
-    sab nearest hubs ka contact number ek hi test number (8210002439) se
-    link kiya gaya hai — jaise hi real hub phone numbers ready hon, ye
-    override hata ke neeche wala Google-Place-Details/fallback logic use
-    karo (uncomment karke)."""
-    return "+91 8210002439"
-    # --- asli logic (abhi disabled) ---
-    # if hub_record.get("phone"):
-    #     return hub_record["phone"]
-    # if hub_record.get("place_id") and GOOGLE_MAPS_API_KEY:
-    #     try:
-    #         details_url = "https://maps.googleapis.com/maps/api/place/details/json"
-    #         details_params = {
-    #             "place_id": hub_record["place_id"],
-    #             "fields": "formatted_phone_number,international_phone_number",
-    #             "key": GOOGLE_MAPS_API_KEY
-    #         }
-    #         d_data = requests.get(details_url, params=details_params, timeout=5).json()
-    #         phone = d_data.get("result", {}).get("formatted_phone_number") or d_data.get("result", {}).get("international_phone_number")
-    #         if phone:
-    #             return phone
-    #     except Exception:
-    #         pass
-    # return "Contact number not available — team will call and share shortly"
+    TEST_HUB_NUMBERS list se hub_index % len() ke hisaab se cyclically ek
+    number assign hota hai (hub 1 → pehla number, hub 2 → doosra, hub 3 →
+    phir pehla, waghera). Jaise hi real hub phone numbers ready ho jaayein,
+    TEST_HUB_NUMBERS ko [] kar dena — neeche wala Google-Place-Details/
+    fallback logic apne aap use hone lagega."""
+    if TEST_HUB_NUMBERS:
+        return TEST_HUB_NUMBERS[hub_index % len(TEST_HUB_NUMBERS)]
+    if hub_record.get("phone"):
+        return hub_record["phone"]
+    if hub_record.get("place_id") and GOOGLE_MAPS_API_KEY:
+        try:
+            details_url = "https://maps.googleapis.com/maps/api/place/details/json"
+            details_params = {
+                "place_id": hub_record["place_id"],
+                "fields": "formatted_phone_number,international_phone_number",
+                "key": GOOGLE_MAPS_API_KEY
+            }
+            d_data = requests.get(details_url, params=details_params, timeout=5).json()
+            phone = d_data.get("result", {}).get("formatted_phone_number") or d_data.get("result", {}).get("international_phone_number")
+            if phone:
+                return phone
+        except Exception:
+            pass
+    return "Contact number not available — team will call and share shortly"
 
 
 def send_whatsapp_text_reply(to_phone: str, text: str):
@@ -1266,7 +1325,7 @@ class EnterpriseAgenticRAGOrchestrator:
 
         closest_hub_str = raw_hubs[0]["display_str"]
         hub_waypoint = raw_hubs[0].get("waypoint")
-        hub_phone = _resolve_hub_phone(raw_hubs[0])
+        hub_phone = _resolve_hub_phone(raw_hubs[0], 0)
 
         numbered_hubs = [f"{idx}. {h['display_str']}" for idx, h in enumerate(raw_hubs, 1)]
         # Full ordered record list (closest first) — kept per-incident so that
@@ -1627,6 +1686,27 @@ async def whatsapp_webhook(request: Request):
                                 del PENDING_QUOTES[inc_id]
                         return {"status": "success", "action": "Vendor marked unavailable."}
 
+                if "ACCEPTREPAIR_" in payload_id:
+                    inc_id = payload_id.split("ACCEPTREPAIR_")[1]
+                    incident_ctx = INCIDENT_DETAILS.get(inc_id, {})
+                    vehicle_id = incident_ctx.get("vehicle_id")
+
+                    cleaned_driver_10 = ''.join(filter(str.isdigit, raw_sender_phone))[-10:]
+                    INCIDENT_CONTEXTS[cleaned_driver_10] = inc_id
+                    if vehicle_id:
+                        ACTIVE_VEHICLE_BY_PHONE[cleaned_driver_10] = vehicle_id
+
+                    send_whatsapp_text_reply(
+                        raw_sender_phone,
+                        "✅ Repair accepted! Ab aap isi chat par live updates, sawaal ya photos "
+                        "seedha AI Operations Agent ko bhej sakte hain."
+                    )
+                    send_whatsapp_text_reply(
+                        MANAGER_WHATSAPP_NUMBER,
+                        f"✅ Driver ({vehicle_id or 'N/A'}) ne repair accept kar liya hai — AI agent chat activate ho gayi hai."
+                    )
+                    return {"status": "success", "action": "Driver accepted repair, AI agent context enabled."}
+
                 if "PICKVENDOR_" in payload_id:
                     # payload shape: PICKVENDOR_<incident_id>_<vendor_10_digit>
                     remainder = payload_id.split("PICKVENDOR_")[1]
@@ -1648,12 +1728,19 @@ async def whatsapp_webhook(request: Request):
                         f"✅ Confirmed: {vendor['hub_name']} — ₹{vendor['price']:.0f} for {part_name}."
                     )
 
-                    driver_phone = DRIVER_WHATSAPP_MAPPING.get(vehicle_id)
+                    # Vendor pick hi ab de-facto "approval" hai — isliye yahi
+                    # se dispatch state set karo, aur driver ko poora
+                    # breakdown+repair+vendor detail ek 'Accept Repair'
+                    # button ke saath bhejo. AI agent chat is button ke tap
+                    # hone par hi officially enable hoga (neeche
+                    # ACCEPTREPAIR_ handler me) — koi manual Approve step
+                    # ab zaroori nahi.
+                    APPROVAL_STATES[inc_id] = "APPROVED_AND_DISPATCHED"
+                    driver_phone = _lookup_driver_phone(vehicle_id)
                     if driver_phone:
                         hub_name = incident_ctx.get("hub", "Nearest Service Center")
                         hub_phone = incident_ctx.get("hub_phone") or "8210002439"
-                        send_whatsapp_text_reply(
-                            driver_phone,
+                        driver_body_text = (
                             f"✅ *Repair & Parts Confirmed*\n\n"
                             f"🚜 *Vehicle:* {vehicle_id}\n"
                             f"🛠️ *Issue:* {incident_ctx.get('issue_type', 'N/A')}\n"
@@ -1663,12 +1750,20 @@ async def whatsapp_webhook(request: Request):
                             f"⚙️ *Part:* {part_name}\n"
                             f"🏭 *Vendor:* {vendor['hub_name']}\n"
                             f"💰 *Approved Price:* ₹{vendor['price']:.0f}\n\n"
-                            f"Ye part yahi hub se collect/deliver karwa lijiye. Kisi bhi update ya sawaal ke liye isi chat par likhein."
+                            f"Neeche 'Accept Repair' dabaayein taaki AI agent chat activate ho jaaye "
+                            f"aur aap isi par live updates/photos share kar sakein."
                         )
+                        result = send_driver_accept_repair_button(driver_phone, inc_id, driver_body_text)
+                        if isinstance(result, dict) and result.get("delivery_failed"):
+                            # Button na jaa paaya to kam se kam plain text detail
+                            # driver tak pahunche — silent failure nahi hona chahiye.
+                            send_whatsapp_text_reply(driver_phone, driver_body_text)
                     else:
                         send_whatsapp_text_reply(
                             MANAGER_WHATSAPP_NUMBER,
-                            f"⚠️ Vendor confirm ho gaya lekin {vehicle_id} ka driver number map nahi mila — manually inform karein."
+                            f"⚠️ Vendor confirm ho gaya lekin {vehicle_id!r} ka driver number "
+                            f"DRIVER_WHATSAPP_MAPPING me nahi mila — manually inform karein. "
+                            f"(Render logs me DEBUG DRIVER LOOKUP FAILED line check karein.)"
                         )
 
                     del PENDING_QUOTES[inc_id]
@@ -1731,7 +1826,7 @@ async def whatsapp_webhook(request: Request):
                         # re-open the HITL approval gate for it — this repeats
                         # every time the manager rejects, until hubs run out.
                         next_hub_record = hub_records[next_index]
-                        next_hub_phone = _resolve_hub_phone(next_hub_record)
+                        next_hub_phone = _resolve_hub_phone(next_hub_record, next_index)
 
                         incident_ctx["hub"] = next_hub_record["name"]
                         incident_ctx["hub_phone"] = next_hub_phone
