@@ -1044,8 +1044,15 @@ def call_ai_agent(manager_text: str, incident_ctx: dict) -> dict:
         "provided in the context, do NOT say you'll 'share it shortly' if the number is already given to you. "
         "If they ask a factual question, answer it directly and specifically using the context given. "
         "If they give an approval/rejection/reroute instruction, classify it accordingly. "
+        "If the DRIVER is sharing a status/location/progress update (e.g. 'leaving for the hub now', "
+        "'reached the workshop', 'on the way', 'running late') and asking or implying that the manager "
+        "should be told — classify this as DRIVER_STATUS_UPDATE. In reply_text for this case, only "
+        "confirm to the driver that you are passing it on RIGHT NOW ('Noted, informing your manager now') — "
+        "never claim the manager has ALREADY been informed, since that message is sent separately, after "
+        "your reply, by the system itself.\n"
         "Classify their decision into exactly one of: APPROVED_AND_DISPATCHED, APPROVED_LOCAL_MECHANIC_REROUTED, "
         "REJECTED_REROUTING, INFO_REQUEST_ANSWERED (for questions/requests for info like phone numbers), "
+        "DRIVER_STATUS_UPDATE (driver's location/progress update meant for the manager), "
         "or CUSTOM_INSTRUCTION_LOGGED (for anything else specific).\n\n"
         "Write a short (1-2 sentence), specific, professional WhatsApp reply that directly addresses what "
         "they asked or said — using the real details from the context (hub name, phone number, part name) "
@@ -1110,6 +1117,14 @@ def _keyword_fallback(text_body: str) -> dict:
         return {
             "decision": "REJECTED_REROUTING",
             "reply_text": "❌ Request rejected, vehicle rerouting initiated."
+        }
+    elif any(kw in t for kw in [
+        "leaving for", "on my way", "on the way", "reached", "arrived",
+        "nikal", "ja rha", "ja raha", "pahunch", "running late", "delay ho"
+    ]):
+        return {
+            "decision": "DRIVER_STATUS_UPDATE",
+            "reply_text": "Noted, informing your manager now."
         }
     else:
         return {
@@ -1643,6 +1658,34 @@ async def whatsapp_webhook(request: Request):
                 EnterpriseAgenticRAGOrchestrator(voice_incident).run_swarm()
                 return {"status": "success", "action": "Incident auto-created from voice note."}
 
+            if msg.get("type") == "location":
+                # WhatsApp ka native "Share Location" (live ya current pin) —
+                # lat/long yahin aata hai, kisi extraction ki zaroorat nahi.
+                loc = msg.get("location", {})
+                lat, lng = loc.get("latitude"), loc.get("longitude")
+                place_name = loc.get("name") or loc.get("address") or "Shared location"
+
+                if lat is None or lng is None:
+                    send_whatsapp_text_reply(raw_sender_phone, "⚠️ Location samajh nahi paya, kripya dobara share karein.")
+                    return {"status": "error", "action": "Location message missing coordinates."}
+
+                maps_link = f"https://www.google.com/maps?q={lat},{lng}"
+                is_driver = sender_10_digit in ACTIVE_VEHICLE_BY_PHONE
+                vehicle_id = ACTIVE_VEHICLE_BY_PHONE.get(sender_10_digit, "N/A") if is_driver else None
+
+                if is_driver:
+                    send_whatsapp_text_reply(
+                        MANAGER_WHATSAPP_NUMBER,
+                        f"📍 *Live Location — {vehicle_id}*\n\n"
+                        f"{place_name}\n"
+                        f"🗺️ {maps_link}"
+                    )
+                    send_whatsapp_text_reply(raw_sender_phone, "✅ Location manager ko forward kar diya gaya.")
+                    return {"status": "success", "action": "Driver location forwarded to manager."}
+                else:
+                    send_whatsapp_text_reply(raw_sender_phone, "📍 Location receive ho gaya.")
+                    return {"status": "success", "action": "Location received (sender not an active driver)."}
+
             if msg.get("type") == "interactive":
                 button_reply = msg["interactive"].get("button_reply", {})
                 payload_id = button_reply.get("id", "")
@@ -1907,11 +1950,25 @@ async def whatsapp_webhook(request: Request):
                 
                 if matched_inc_id:
                     incident_ctx = INCIDENT_DETAILS.get(matched_inc_id, {})
-                    if sender_10_digit in ACTIVE_VEHICLE_BY_PHONE:
+                    is_driver = sender_10_digit in ACTIVE_VEHICLE_BY_PHONE
+                    if is_driver:
                         incident_ctx["current_chatter"] = f"Driver of {ACTIVE_VEHICLE_BY_PHONE[sender_10_digit]}"
-                    
+
                     ai_result = call_ai_agent(text_body, incident_ctx)
                     resp = send_whatsapp_text_reply(raw_sender_phone, ai_result["reply_text"])
+
+                    # Driver ka location/status update sirf usi ko reply karke
+                    # nahi chhodna — AI ka reply pehle sirf driver ko "noted"
+                    # bol deta tha, lekin manager ko kabhi ACTUALLY forward
+                    # nahi hota tha. Ab jab bhi ye decision fire ho, manager ko
+                    # turant real update jaata hai, driver ke apne words me.
+                    if is_driver and ai_result.get("decision") == "DRIVER_STATUS_UPDATE":
+                        vehicle_id = ACTIVE_VEHICLE_BY_PHONE.get(sender_10_digit, incident_ctx.get("vehicle_id", "N/A"))
+                        send_whatsapp_text_reply(
+                            MANAGER_WHATSAPP_NUMBER,
+                            f"📍 *Driver Update — {vehicle_id}*\n\n\"{text_body}\""
+                        )
+
                     return {"status": "success", "action": "Smart AI agent replied to chatter.", "decision": ai_result["decision"]}
                 else:
                     send_whatsapp_text_reply(raw_sender_phone, "⚠️ No active fleet incident context found for your session.")
