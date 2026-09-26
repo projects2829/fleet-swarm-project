@@ -188,18 +188,6 @@ function App() {
           </form>
         </div>
 
-        {/* ==========================================================
-        NOTE: "Execute Agentic RAG Swarm & Dispatch WhatsApp Alert" button
-        ke baad ka poora result-display UI (error box, RAG diagnostic card,
-        HITL/WhatsApp status card, hubs list, route link) neeche disable
-        kar diya gaya hai. Code delete nahi kiya gaya, sirf false-and se
-        render hone se roka gaya hai, kyunki iske andar pehle se JSX
-        comments maujood hain, aur unhe ek bade comment ke andar lapetne se
-        ye jaldi close ho jaata (nested comment allowed nahi hai JS me).
-        Wapas dikhane ke liye neeche "false &&" ko hata dena kaafi hai.
-        ========================================================== */}
-        {false && (
-        <>
         {error && (
           <div className="bg-red-950/80 border border-red-800 text-red-200 p-4 rounded-xl text-sm">
             {String(error)}
@@ -335,8 +323,6 @@ function App() {
             </div>
 
           </div>
-        )}
-        </>
         )}
 
       </div>
