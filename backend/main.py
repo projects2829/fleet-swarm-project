@@ -708,10 +708,22 @@ def _notify_manager_with_quotes(incident_id: str) -> bool:
         return False
     quoted.sort(key=lambda v: v["price"])
     result = send_vendor_choice_buttons(incident_id, quoted, quote_ctx["part_name"])
-    if isinstance(result, dict) and result.get("delivery_failed"):
+    # NOTE: pehle sirf "delivery_failed" flag check hota tha — agar
+    # send_vendor_choice_buttons ke andar exception (network/timeout) aata,
+    # wo {"status": "error", ...} return karta, jisme "delivery_failed" key
+    # hoti hi nahi — isliye fallback text bhi silently skip ho jaata tha aur
+    # manager ko interactive buttons YA fallback, dono me se kuch nahi
+    # jaata tha (jabki manager_notified=True set ho jaata, dobara try bhi
+    # nahi hota). Ab dono cases (non-200 response AND exception) fallback
+    # trigger karte hain — same fix jo ACCEPTREPAIR button flow me hai.
+    send_failed = isinstance(result, dict) and (
+        result.get("delivery_failed") or result.get("status") == "error"
+    )
+    if send_failed:
         # Interactive buttons na jaa paaye (button-title limit, template
-        # issue, etc.) — manager ko kam se kam plain text me list to milni
-        # chahiye, taaki wo manually reply karke vendor choose kar sake.
+        # issue, network error, etc.) — manager ko kam se kam plain text me
+        # list to milni chahiye, taaki wo manually reply karke vendor
+        # choose kar sake.
         fallback_lines = [f"💰 *Spare Part Price Comparison*\n*Part:* {quote_ctx['part_name']}\n"]
         for i, v in enumerate(quoted[:3]):
             tag = " ✅ Best" if i == 0 else ""
