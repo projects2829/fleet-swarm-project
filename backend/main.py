@@ -126,6 +126,23 @@ DRIVER_PHONE_TO_VEHICLE = {
     for vid, phone in DRIVER_WHATSAPP_MAPPING.items()
 }
 
+# Feature: Per-Vehicle Predictive Maintenance — vehicle_id -> list of
+# {issue_type, keywords, ts} records, so a repeating breakdown pattern on
+# the SAME vehicle can be flagged to the manager automatically.
+VEHICLE_ISSUE_HISTORY = PersistentDict("vehicle_issue_history")
+PREDICTIVE_PATTERN_WINDOW_DAYS = int(os.getenv("PREDICTIVE_PATTERN_WINDOW_DAYS", "90"))
+PREDICTIVE_PATTERN_MIN_REPEATS = int(os.getenv("PREDICTIVE_PATTERN_MIN_REPEATS", "2"))
+
+# Feature: Proactive Driver Follow-up — incident_id -> unix ts of the last
+# time the driver actually messaged us about it (text/photo/location). Used
+# to decide whether a scheduled check-in is still needed or the driver has
+# already updated us in the meantime.
+DRIVER_LAST_UPDATE_TS = PersistentDict("driver_last_update_ts")
+# How long to wait after a repair is dispatched before proactively checking
+# in on the driver if they've gone silent. Configurable via env for testing
+# (e.g. set to 120 for a 2-minute demo instead of the real-world default).
+FOLLOWUP_CHECK_DELAY_SECONDS = int(os.getenv("FOLLOWUP_CHECK_DELAY_SECONDS", str(2 * 60 * 60)))
+
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 
 # ==========================================
@@ -464,6 +481,111 @@ def _transcribe_voice_note(audio_bytes: bytes, mime_type: str = "audio/ogg") -> 
 
 
 # ==========================================
+# Features 1 & 2: IN-CHAT PHOTO DIAGNOSIS + SELF-SERVICE REPAIR GUIDANCE —
+# driver jab bhi WhatsApp chat me kabhi bhi (sirf initial report ke time
+# nahi) part/engine/tyre/dashboard ki photo bheje, Gemini Vision use turant
+# analyze karke severity aur ek verdict deta hai: agar chhota/safe issue hai
+# to driver ko khud-thik-karne ke step-by-step instructions milte hain
+# (mechanic dispatch ki zaroorat nahi), warna manager ko photo + AI
+# diagnosis ke saath escalate kar diya jaata hai.
+# ==========================================
+def _diagnose_incident_photo(image_bytes: bytes, mime_type: str, incident_ctx: dict) -> Optional[Dict[str, Any]]:
+    """Gemini Vision se photo ka real diagnosis leta hai. Return shape:
+    {visible_damage, severity, can_self_fix, diy_steps, recommended_part,
+    driver_message} — ya None agar Gemini unavailable/fail ho jaaye (caller
+    tab safe generic fallback message dikhata hai, kabhi crash nahi hota)."""
+    if not GEMINI_API_KEY:
+        return None
+    try:
+        import base64
+        img_b64 = base64.b64encode(image_bytes).decode("utf-8")
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            f"gemini-flash-latest:generateContent?key={GEMINI_API_KEY}"
+        )
+        prompt = (
+            "You are a heavy commercial vehicle (truck/bus) diagnostic assistant for an Indian fleet "
+            "operator. A driver just sent this photo in WhatsApp chat about their vehicle "
+            f"(Vehicle ID: {incident_ctx.get('vehicle_id', 'unknown')}, previously reported issue: "
+            f"'{incident_ctx.get('issue_type', 'not specified')}'). Look at the photo carefully and give "
+            "a real, specific assessment — never a generic placeholder.\n\n"
+            "Respond ONLY with strict JSON, no markdown fences, no preamble, in this exact shape:\n"
+            '{"visible_damage": "<specific description of what you actually see>", '
+            '"severity": "LOW"|"MODERATE"|"HIGH"|"CRITICAL", '
+            '"can_self_fix": true/false, '
+            '"diy_steps": ["step 1", "step 2", ...] (empty list if can_self_fix is false), '
+            '"recommended_part": "<part/kit name if a replacement looks needed, else empty string>", '
+            '"driver_message": "<a short 2-4 sentence WhatsApp reply in Hinglish (Hindi written in roman '
+            'letters, natural and driver-friendly) explaining the diagnosis, and either the DIY steps or '
+            'that help/a mechanic is being arranged>"}\n\n'
+            "Rules: only set can_self_fix=true for genuinely minor, safe roadside fixes needing no tools/"
+            "training (e.g. a loose connector, topping up coolant/water, a stuck relay, a blown fuse, "
+            "reseating a battery terminal). NEVER suggest self-fixing brakes, steering, the fuel system, "
+            "anything electrical under load, or anything requiring lifting the vehicle or working near a "
+            "running engine or hot parts — for those, can_self_fix must be false. If the photo is unclear "
+            "or you are not confident, set can_self_fix=false, severity to MODERATE, and ask for a "
+            "clearer/well-lit photo in driver_message instead of guessing."
+        )
+        body = {
+            "contents": [{
+                "parts": [
+                    {"text": prompt},
+                    {"inline_data": {"mime_type": mime_type, "data": img_b64}}
+                ]
+            }],
+            "generationConfig": {"temperature": 0.2, "response_mime_type": "application/json"}
+        }
+        resp = requests.post(url, json=body, timeout=20)
+        resp.raise_for_status()
+        data = resp.json()
+        raw_text = data["candidates"][0]["content"]["parts"][0]["text"]
+        cleaned = raw_text.strip().strip("`")
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:].strip()
+        parsed = json.loads(cleaned)
+        if parsed.get("driver_message"):
+            parsed.setdefault("severity", "MODERATE")
+            if parsed["severity"] not in ("LOW", "MODERATE", "HIGH", "CRITICAL"):
+                parsed["severity"] = "MODERATE"
+            parsed.setdefault("can_self_fix", False)
+            parsed.setdefault("diy_steps", [])
+            parsed.setdefault("recommended_part", "")
+            parsed.setdefault("visible_damage", "Not clearly identifiable from photo")
+            return parsed
+    except Exception as e:
+        print(f"DEBUG PHOTO DIAGNOSIS ERROR: {str(e)}")
+    return None
+
+
+def _forward_whatsapp_image(to_phone: str, media_id: str, caption: str = ""):
+    """Driver ki bheji hui photo manager ko bhi forward karta hai, isi
+    already-uploaded media_id ke through — koi re-download/re-upload nahi.
+    Best-effort hai: agar Meta account setup me ye fail ho (media_id doosre
+    recipient ke liye valid na ho), caller isse silently ignore karta hai —
+    driver-facing diagnosis reply is se kabhi block nahi hota."""
+    if not WHATSAPP_TOKEN or WHATSAPP_TOKEN == "YOUR_TOKEN" or not media_id:
+        return {"status": "simulated_or_skipped"}
+    cleaned_phone = ''.join(filter(str.isdigit, to_phone))
+    url = f"https://graph.facebook.com/v26.0/{WHATSAPP_PHONE_ID}/messages"
+    headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
+    image_payload = {"id": media_id}
+    if caption:
+        image_payload["caption"] = caption
+    body = {
+        "messaging_product": "whatsapp",
+        "to": cleaned_phone,
+        "type": "image",
+        "image": image_payload
+    }
+    try:
+        res = requests.post(url, json=body, headers=headers, timeout=10)
+        return {"status_code": res.status_code, "delivery_failed": res.status_code != 200}
+    except Exception as e:
+        print(f"DEBUG IMAGE FORWARD EXCEPTION: {str(e)}")
+        return {"status": "error", "details": str(e)}
+
+
+# ==========================================
 # SPARE-PART PRICE COMPARISON — jab service centre milta hai, top nearby
 # vendors se real-time quote maanga jaata hai; jawab aane par AI compare
 # karke best price manager ko dikhata hai, aur zaroorat par ek round
@@ -609,6 +731,71 @@ def _finalize_quotes_after_timeout(incident_id: str):
         _notify_manager_with_quotes(incident_id)
     except Exception as e:
         print(f"DEBUG QUOTE TIMEOUT ERROR: {str(e)}")
+
+
+# ==========================================
+# Feature 5: PROACTIVE DRIVER FOLLOW-UP — jab bhi repair dispatch/accept ho
+# jaata hai, ek background timer set ho jaata hai. Agar driver ne itni der
+# tak koi naya update nahi bheja, AI khud check-in kar leta hai — driver ka
+# passively wait nahi karta. Har real driver message DRIVER_LAST_UPDATE_TS
+# refresh karta hai (webhook me), isliye agar driver pehle hi update de
+# chuka hai to ye check silently kuch nahi karta.
+# ==========================================
+def _schedule_followup_check(incident_id: str):
+    """Ek incident ke liye follow-up timer arm karta hai. Idempotent hona
+    caller (ACCEPTREPAIR_/APPROVE_ handlers) ki zimmedari hai — wahaan
+    incident_ctx['followup_scheduled'] flag se duplicate scheduling roki
+    jaati hai."""
+    scheduled_at = time.time()
+    DRIVER_LAST_UPDATE_TS[incident_id] = scheduled_at
+    threading.Timer(FOLLOWUP_CHECK_DELAY_SECONDS, _run_followup_check, args=[incident_id, scheduled_at]).start()
+    print(f"DEBUG FOLLOWUP SCHEDULED: incident={incident_id} in {FOLLOWUP_CHECK_DELAY_SECONDS}s")
+
+
+def _run_followup_check(incident_id: str, scheduled_at: float):
+    """Timer fire hone par chalta hai. Agar driver ne is beech me khud
+    update de diya (DRIVER_LAST_UPDATE_TS scheduled_at se aage badh gaya),
+    to chup-chaap kuch nahi karta. Warna driver ko ek friendly check-in aur
+    manager ko ek heads-up bhejta hai, aur agla follow-up phir se chain kar
+    deta hai jab tak incident reject/close na ho jaaye."""
+    try:
+        incident_ctx = INCIDENT_DETAILS.get(incident_id)
+        if not incident_ctx:
+            return
+        if APPROVAL_STATES.get(incident_id) == "REJECTED_REROUTING":
+            return
+
+        last_update = DRIVER_LAST_UPDATE_TS.get(incident_id, 0)
+        if last_update > scheduled_at:
+            # Driver ne is beech me khud update de diya — dobara check-in
+            # bhejne ki zaroorat nahi, lekin AGLA follow-up window abhi bhi
+            # arm karo taaki silence ka pattern chalte rehte hue bhi pakda jaaye.
+            threading.Timer(
+                FOLLOWUP_CHECK_DELAY_SECONDS, _run_followup_check, args=[incident_id, last_update]
+            ).start()
+            return
+
+        vehicle_id = incident_ctx.get("vehicle_id", "N/A")
+        driver_phone = _lookup_driver_phone(vehicle_id)
+        if driver_phone:
+            send_whatsapp_text_reply(
+                driver_phone,
+                f"👋 Namaste, *{vehicle_id}* ki repair kaisi chal rahi hai? "
+                f"Koi update ya madad chahiye ho to yahin bata dein."
+            )
+        hours = round(FOLLOWUP_CHECK_DELAY_SECONDS / 3600, 1)
+        send_whatsapp_text_reply(
+            MANAGER_WHATSAPP_NUMBER,
+            f"⏰ *Follow-up:* {vehicle_id} se {hours} ghante se koi update nahi aaya — "
+            f"driver ko proactively check-in bhej diya gaya hai."
+        )
+        # Chain karo — jab tak incident reject/close na ho, silence continue
+        # hone par baar-baar follow-up hota rahega, ek-time reminder nahi.
+        threading.Timer(
+            FOLLOWUP_CHECK_DELAY_SECONDS, _run_followup_check, args=[incident_id, time.time()]
+        ).start()
+    except Exception as e:
+        print(f"DEBUG FOLLOWUP CHECK ERROR: {str(e)}")
 
 
 def _extract_price_from_reply(vendor_text: str) -> Optional[Dict[str, Any]]:
@@ -764,16 +951,59 @@ def _handle_vendor_quote_reply(incident_id: str, vendor_10_digit: str, text_body
     return True
 
 
+def _extract_keywords(text: str, limit: int = 10) -> List[str]:
+    """Chhote, significant keywords (3+ letters, common stopwords hataakar)
+    nikaalta hai — self-learning knowledge base aur per-vehicle predictive
+    pattern detection, dono isi shared logic ko use karte hain taaki 'same
+    issue' ki matching ek hi jagah se define ho."""
+    raw_words = re.findall(r"[a-zA-Z]{3,}", (text or "").lower())
+    stopwords = {"the", "and", "for", "with", "not", "has", "have", "was", "are"}
+    keywords = list(dict.fromkeys(w for w in raw_words if w not in stopwords))[:limit]
+    if not keywords:
+        keywords = [(text or "").lower()[:30]]
+    return keywords
+
+
+def _record_and_check_vehicle_pattern(vehicle_id: Optional[str], issue_type: str) -> Optional[str]:
+    """Feature: Per-Vehicle Predictive Maintenance. Har naye incident ko us
+    vehicle ki (SQLite-persisted) history me record karta hai, aur agar isi
+    tarah ka issue (overlapping keywords) is vehicle par pichle
+    PREDICTIVE_PATTERN_WINDOW_DAYS din me kam-se-kam PREDICTIVE_PATTERN_MIN_REPEATS
+    baar ho chuka hai, to manager ke liye ek chhota predictive-maintenance
+    warning string return karta hai — taaki sirf part badalna hi solution na
+    ban jaaye, ek baar poora inspection bhi ho jaaye. Returns None agar koi
+    repeat-pattern nahi mila (ya vehicle_id hi nahi hai)."""
+    if not vehicle_id:
+        return None
+
+    new_keywords = set(_extract_keywords(issue_type))
+    now = time.time()
+    cutoff = now - (PREDICTIVE_PATTERN_WINDOW_DAYS * 86400)
+
+    history = VEHICLE_ISSUE_HISTORY.get(vehicle_id, [])
+    recent_history = [h for h in history if h.get("ts", 0) >= cutoff]
+
+    matches = [h for h in recent_history if new_keywords & set(h.get("keywords", []))]
+
+    recent_history.append({"issue_type": issue_type, "keywords": list(new_keywords), "ts": now})
+    VEHICLE_ISSUE_HISTORY[vehicle_id] = recent_history
+
+    if len(matches) >= PREDICTIVE_PATTERN_MIN_REPEATS:
+        return (
+            f"🔁 *Predictive Maintenance Alert:* {vehicle_id} par milta-julta issue pichle "
+            f"{PREDICTIVE_PATTERN_WINDOW_DAYS} din me {len(matches)} baar aa chuka hai (is baar "
+            f"milaakar {len(matches) + 1}). Sirf part replace karne ke bajaye ek poora inspection "
+            f"karwana recommend hai."
+        )
+    return None
+
+
 def _build_learned_doc_from_incident(incident_ctx: Dict[str, Any]) -> Dict[str, Any]:
     """Manager-approved AI diagnosis ko ek proper knowledge-base document me
     convert karta hai — agli baar wahi/similar issue aane par ye manual-grounded
     high-confidence match banega, Gemini fallback nahi."""
     issue_type = incident_ctx.get("issue_type", "")
-    raw_words = re.findall(r"[a-zA-Z]{3,}", issue_type.lower())
-    stopwords = {"the", "and", "for", "with", "not", "has", "have", "was", "are"}
-    keywords = list(dict.fromkeys(w for w in raw_words if w not in stopwords))[:10]
-    if not keywords:
-        keywords = [issue_type.lower()[:30]]
+    keywords = _extract_keywords(issue_type)
 
     doc_id = "AUTOLEARN-" + hashlib.md5(issue_type.encode("utf-8")).hexdigest()[:8].upper()
     return {
@@ -1057,11 +1287,21 @@ def call_ai_agent(manager_text: str, incident_ctx: dict) -> dict:
         "REJECTED_REROUTING, INFO_REQUEST_ANSWERED (for questions/requests for info like phone numbers), "
         "DRIVER_STATUS_UPDATE (driver's location/progress update meant for the manager), "
         "or CUSTOM_INSTRUCTION_LOGGED (for anything else specific).\n\n"
+        "LANGUAGE MATCHING (important): always write reply_text in the SAME language and script the sender "
+        "just used — if they wrote in Hindi/Devanagari script, reply in Devanagari; if they wrote Hinglish "
+        "(Hindi words in Roman/English letters), reply in Hinglish the same way; if they wrote in plain "
+        "English, reply in English. Never switch script or language on your own, and never mix scripts.\n\n"
+        "URGENCY ASSESSMENT (important): also assess how urgent their message is and set 'urgency' to exactly "
+        "one of: CRITICAL (life-threatening — accident, fire, vehicle overturned, someone injured/hurt), "
+        "URGENT (serious safety/operational risk needing the manager's immediate attention right now — brake "
+        "or steering failure, major fuel/oil/gas leak, breakdown on a highway at night, cargo at risk), or "
+        "NORMAL (routine status updates, questions, approvals, minor issues). Default to NORMAL unless the "
+        "message clearly indicates otherwise — never inflate routine messages to sound more serious than they are.\n\n"
         "Write a short (1-2 sentence), specific, professional WhatsApp reply that directly addresses what "
         "they asked or said — using the real details from the context (hub name, phone number, part name) "
         "wherever relevant.\n\n"
         "Respond ONLY as valid JSON in this exact format without markdown code blocks: "
-        "{\"decision\": \"...\", \"reply_text\": \"...\"}"
+        "{\"decision\": \"...\", \"reply_text\": \"...\", \"urgency\": \"NORMAL\"|\"URGENT\"|\"CRITICAL\"}"
     )
 
     user_prompt = (
@@ -1097,6 +1337,9 @@ def call_ai_agent(manager_text: str, incident_ctx: dict) -> dict:
             parsed = json.loads(cleaned_content)
 
             if parsed.get("decision") and parsed.get("reply_text"):
+                parsed.setdefault("urgency", "NORMAL")
+                if parsed["urgency"] not in ("NORMAL", "URGENT", "CRITICAL"):
+                    parsed["urgency"] = "NORMAL"
                 return parsed
         except Exception as e:
             print(f"DEBUG GEMINI AI ERROR [{attempt_model}]: {str(e)}")
@@ -1104,20 +1347,32 @@ def call_ai_agent(manager_text: str, incident_ctx: dict) -> dict:
 
     return _keyword_fallback(manager_text)
 
+# Feature 4 (Urgency Detection) safety-net for when Gemini is unavailable —
+# no real language-understanding is possible here, so this is a simple but
+# high-recall keyword net for genuinely life-threatening situations only.
+_CRITICAL_URGENCY_KEYWORDS = [
+    "accident", "durghatna", "fire", "aag lag", "aag laga", "blast", "vishfot",
+    "injured", "injury", "chot lag", "ghayal", "palat gaya", "palti", "overturn",
+    "jal gaya", "jal raha", "burn", "khoon"
+]
+
+
 def _keyword_fallback(text_body: str) -> dict:
     t = text_body.lower()
+    urgency = "CRITICAL" if any(kw in t for kw in _CRITICAL_URGENCY_KEYWORDS) else "NORMAL"
+
     if "local" in t or "fatuha" in t or "sasta" in t or "bypass" in t:
-        return {
+        result = {
             "decision": "APPROVED_LOCAL_MECHANIC_REROUTED",
             "reply_text": "✅ Understood — the vehicle has been rerouted to the local mechanic."
         }
     elif "ok" in t or "haan" in t or "kardo" in t or "approve" in t:
-        return {
+        result = {
             "decision": "APPROVED_AND_DISPATCHED",
             "reply_text": "✅ Repair approved, dispatch sequence has been initiated."
         }
     elif "cancel" in t or "reject" in t or "mat" in t:
-        return {
+        result = {
             "decision": "REJECTED_REROUTING",
             "reply_text": "❌ Request rejected, vehicle rerouting initiated."
         }
@@ -1125,15 +1380,20 @@ def _keyword_fallback(text_body: str) -> dict:
         "leaving for", "on my way", "on the way", "reached", "arrived",
         "nikal", "ja rha", "ja raha", "pahunch", "running late", "delay ho"
     ]):
-        return {
+        result = {
             "decision": "DRIVER_STATUS_UPDATE",
             "reply_text": "Noted, informing your manager now. Kripya apna live location bhi share kar dein 📍"
         }
     else:
-        return {
+        result = {
             "decision": f"CUSTOM_INSTRUCTION_LOGGED: {text_body}",
             "reply_text": "📝 Your instruction has been recorded, the team will follow up."
         }
+
+    if urgency == "CRITICAL":
+        result["reply_text"] = "🆘 Samajh gaya, ye emergency hai — manager ko turant alert kiya jaa raha hai. " + result["reply_text"]
+    result["urgency"] = urgency
+    return result
 
 
 # ==========================================
@@ -1386,6 +1646,10 @@ class EnterpriseAgenticRAGOrchestrator:
         # 5. Multi-Modal Vision Analysis
         vision_report = self._run_multi_modal_vision_inspection()
 
+        # Feature: Per-Vehicle Predictive Maintenance — check BEFORE recording
+        # this incident, so "matches" only counts genuinely PRIOR occurrences.
+        predictive_alert = _record_and_check_vehicle_pattern(self.incident.vehicle_id, self.incident.issue_type)
+
         # Feature: Spare-Part Price Comparison — ask top 3 nearby vendors for
         # availability/price on this specific part. Their WhatsApp replies
         # get picked up later in the webhook handler.
@@ -1414,7 +1678,9 @@ class EnterpriseAgenticRAGOrchestrator:
             "hub_index": 0,
             "recommended_part": rag_intel["recommended_part"],
             "hallucination_grade": rag_intel.get("hallucination_grade"),
-            "diagnostic_summary": rag_intel.get("diagnostic_summary", "")
+            "diagnostic_summary": rag_intel.get("diagnostic_summary", ""),
+            "predictive_alert": predictive_alert,
+            "followup_scheduled": False
         }
 
         # Agent 1: Triage & Vision Multi-Modal Agent Trace
@@ -1490,7 +1756,8 @@ class EnterpriseAgenticRAGOrchestrator:
                 "rag_diagnostic_part": rag_intel["recommended_part"],
                 "crag_status": rag_intel["hallucination_grade"],
                 "mitigation_summary": f"Google-level Hybrid RAG & CRAG part match executed. Waiting for Manager WhatsApp approval.",
-                "erp_ref": erp["erp_transaction_id"]
+                "erp_ref": erp["erp_transaction_id"],
+                "predictive_maintenance_alert": predictive_alert
             }
         )
 
@@ -1508,12 +1775,16 @@ async def get_approval_status(incident_id: str):
 
 def send_whatsapp_interactive_approval(incident_id: str, to_phone: str, vehicle_id: str, hub: str,
                                         location: str, issue_type: str, severity: str,
-                                        cargo_type: str, recommended_part: str):
+                                        cargo_type: str, recommended_part: str,
+                                        predictive_alert: Optional[str] = None):
     """Approve/Reject interactive button bhejta hai — initial manager alert aur
-    har automatic reject-reroute cycle, dono isi ek function se guzarte hain."""
+    har automatic reject-reroute cycle, dono isi ek function se guzarte hain.
+    predictive_alert diya ho (Feature 6: Per-Vehicle Predictive Maintenance)
+    to wahi body text me manager ko dikha diya jaata hai."""
     cleaned_phone = re.sub(r'\D', '', to_phone or "")
     token = WHATSAPP_TOKEN
     phone_id = WHATSAPP_PHONE_ID
+    predictive_block = f"\n{predictive_alert}\n" if predictive_alert else ""
 
     if token and token != "YOUR_TOKEN":
         url = f"https://graph.facebook.com/v26.0/{phone_id}/messages"
@@ -1535,7 +1806,8 @@ def send_whatsapp_interactive_approval(incident_id: str, to_phone: str, vehicle_
                         f"📍 *Location:* {location}\n"
                         f"🛠️ *Issue:* {issue_type}\n\n"
                         f"🧠 *Hybrid RAG Part:* _{recommended_part}_\n"
-                        f"🏢 *Hub:* {hub}\n\n"
+                        f"🏢 *Hub:* {hub}\n"
+                        f"{predictive_block}\n"
                         f"Authorize repair or reply with instructions?"
                     )
                 },
@@ -1579,6 +1851,11 @@ async def send_whatsapp_interactive(payload: dict, _auth=Depends(require_api_key
     severity = payload.get("severity", "N/A")
     cargo_type = payload.get("cargo_type", "N/A")
     recommended_part = payload.get("recommended_part", "Standard Spare Kit")
+    # Feature 6: pull whatever predictive-maintenance alert run_swarm already
+    # computed and stored for this incident, so it's shown right on the
+    # manager's initial approval card without the frontend needing to know
+    # this feature exists.
+    predictive_alert = INCIDENT_DETAILS.get(incident_id, {}).get("predictive_alert") if incident_id else None
 
     return send_whatsapp_interactive_approval(
         incident_id=incident_id,
@@ -1589,7 +1866,8 @@ async def send_whatsapp_interactive(payload: dict, _auth=Depends(require_api_key
         issue_type=issue_type,
         severity=severity,
         cargo_type=cargo_type,
-        recommended_part=recommended_part
+        recommended_part=recommended_part,
+        predictive_alert=predictive_alert
     )
 
 @app.get("/api/whatsapp-webhook")
@@ -1661,6 +1939,100 @@ async def whatsapp_webhook(request: Request):
                 EnterpriseAgenticRAGOrchestrator(voice_incident).run_swarm()
                 return {"status": "success", "action": "Incident auto-created from voice note."}
 
+            # ==========================================
+            # Features 1 & 2: IN-CHAT PHOTO DIAGNOSIS + SELF-SERVICE REPAIR
+            # GUIDANCE — driver kabhi bhi (sirf initial report ke time nahi)
+            # chat me photo bhej sakta hai, AI turant analyze karke jawab
+            # deta hai. Pehle sirf initial /api/triage ke image_url field se
+            # hi vision analysis chalta tha; ab WhatsApp chat ka `image`
+            # message type bhi seedha yahin handle hota hai.
+            # ==========================================
+            if msg.get("type") == "image":
+                media_id = msg["image"].get("id")
+                mime_type = msg["image"].get("mime_type", "image/jpeg").split(";")[0]
+                image_bytes = _download_whatsapp_media(media_id) if media_id else None
+
+                if not image_bytes:
+                    send_whatsapp_text_reply(raw_sender_phone, "⚠️ Photo download nahi ho payi, kripya dobara bhejein.")
+                    return {"status": "error", "action": "Image download failed."}
+
+                is_driver = sender_10_digit in ACTIVE_VEHICLE_BY_PHONE
+                matched_inc_id = INCIDENT_CONTEXTS.get(sender_10_digit)
+                if not matched_inc_id and INCIDENT_CONTEXTS:
+                    matched_inc_id = list(INCIDENT_CONTEXTS.values())[-1]
+                incident_ctx = INCIDENT_DETAILS.get(matched_inc_id, {}) if matched_inc_id else {}
+                vehicle_id = ACTIVE_VEHICLE_BY_PHONE.get(sender_10_digit, incident_ctx.get("vehicle_id", "N/A"))
+
+                if not GEMINI_API_KEY:
+                    # Vision analysis unavailable — driver ko turant confirm
+                    # karo (kabhi silent drop nahi), manager ko manual-review
+                    # ke liye flag karo.
+                    send_whatsapp_text_reply(
+                        raw_sender_phone,
+                        "📸 Photo mil gayi, team ko forward kar diya gaya hai — jald hi update milega."
+                    )
+                    if matched_inc_id:
+                        send_whatsapp_text_reply(
+                            MANAGER_WHATSAPP_NUMBER,
+                            f"📸 *Photo received from driver — {vehicle_id}*\n\n"
+                            f"(AI vision analysis unavailable — GEMINI_API_KEY not set. Please review manually.)"
+                        )
+                        _forward_whatsapp_image(MANAGER_WHATSAPP_NUMBER, media_id)
+                    return {"status": "success", "action": "Image received, AI vision unavailable, forwarded raw."}
+
+                diagnosis = _diagnose_incident_photo(image_bytes, mime_type, incident_ctx)
+                if not diagnosis:
+                    send_whatsapp_text_reply(
+                        raw_sender_phone,
+                        "⚠️ Photo analyze nahi ho payi. Kripya thoda clear/roshni me dobara photo bhejein, "
+                        "ya seedha text me bata dein."
+                    )
+                    return {"status": "error", "action": "Photo diagnosis failed."}
+
+                if matched_inc_id:
+                    # Feature 5: photo bhejna bhi ek genuine driver update hai.
+                    DRIVER_LAST_UPDATE_TS[matched_inc_id] = time.time()
+
+                reply_lines = [f"📸 *AI Photo Diagnosis*\n{diagnosis['driver_message']}"]
+                if diagnosis.get("can_self_fix") and diagnosis.get("diy_steps"):
+                    reply_lines.append("\n🔧 *Khud karne ke steps:*")
+                    for i, step in enumerate(diagnosis["diy_steps"], 1):
+                        reply_lines.append(f"{i}. {step}")
+                    reply_lines.append("\nAgar isse thik na ho ya asuraksha lage, turant bata dein — hum mechanic bhej denge.")
+                send_whatsapp_text_reply(raw_sender_phone, "\n".join(reply_lines))
+
+                severity = diagnosis.get("severity", "MODERATE")
+                icon = {"CRITICAL": "🆘", "HIGH": "🚨"}.get(severity, "📸")
+                manager_lines = [
+                    f"{icon} *Driver photo — {vehicle_id}* (Severity: {severity})",
+                    f"AI diagnosis: {diagnosis.get('visible_damage', 'N/A')}"
+                ]
+                if diagnosis.get("can_self_fix"):
+                    manager_lines.append("Driver ko self-fix (DIY) steps de diye gaye hain — mechanic dispatch abhi zaroori nahi.")
+                else:
+                    manager_lines.append(
+                        f"Professional help chahiye — recommended: {diagnosis.get('recommended_part') or 'inspection'}."
+                    )
+                send_whatsapp_text_reply(MANAGER_WHATSAPP_NUMBER, "\n".join(manager_lines))
+                # Best-effort: driver ki actual photo bhi manager ko forward
+                # karne ki koshish karo (fail ho to upar wala text summary
+                # already bhej diya gaya hai, kuch bhi block nahi hota).
+                _forward_whatsapp_image(MANAGER_WHATSAPP_NUMBER, media_id)
+
+                # Feature 4 (Urgency): HIGH/CRITICAL photo severity ko
+                # incident record par bhi turant reflect karo, aur agar
+                # CRITICAL hai to ek standalone emergency escalation bhejo.
+                if matched_inc_id and severity in ("HIGH", "CRITICAL"):
+                    incident_ctx["severity"] = severity
+                    INCIDENT_DETAILS[matched_inc_id] = incident_ctx
+                if severity == "CRITICAL":
+                    send_whatsapp_text_reply(
+                        MANAGER_WHATSAPP_NUMBER,
+                        f"🆘 *CRITICAL ALERT — {vehicle_id}*\n\nPhoto se critical damage/safety risk dikh raha hai. Turant dhyaan dein / call karein."
+                    )
+
+                return {"status": "success", "action": "Photo diagnosed and forwarded.", "severity": severity, "can_self_fix": diagnosis.get("can_self_fix", False)}
+
             if msg.get("type") == "location":
                 # WhatsApp ka native "Share Location" (live ya current pin) —
                 # lat/long yahin aata hai, kisi extraction ki zaroorat nahi.
@@ -1677,6 +2049,9 @@ async def whatsapp_webhook(request: Request):
                 vehicle_id = ACTIVE_VEHICLE_BY_PHONE.get(sender_10_digit, "N/A") if is_driver else None
 
                 if is_driver:
+                    inc_id_for_update = INCIDENT_CONTEXTS.get(sender_10_digit)
+                    if inc_id_for_update:
+                        DRIVER_LAST_UPDATE_TS[inc_id_for_update] = time.time()
                     send_whatsapp_text_reply(
                         MANAGER_WHATSAPP_NUMBER,
                         f"📍 *Live Location — {vehicle_id}*\n\n"
@@ -1752,6 +2127,15 @@ async def whatsapp_webhook(request: Request):
                         MANAGER_WHATSAPP_NUMBER,
                         f"✅ Driver ({vehicle_id or 'N/A'}) ne repair accept kar liya hai — AI agent chat activate ho gayi hai."
                     )
+
+                    # Feature 5 (Proactive Follow-up) — sirf ek baar arm karo
+                    # per incident, chahe driver 'Accept Repair' aur baad me
+                    # koi doosra dispatch-confirmation dono trigger kar de.
+                    if not incident_ctx.get("followup_scheduled"):
+                        incident_ctx["followup_scheduled"] = True
+                        INCIDENT_DETAILS[inc_id] = incident_ctx
+                        _schedule_followup_check(inc_id)
+
                     return {"status": "success", "action": "Driver accepted repair, AI agent context enabled."}
 
                 if "PICKVENDOR_" in payload_id:
@@ -1871,6 +2255,12 @@ async def whatsapp_webhook(request: Request):
                         )
                         send_whatsapp_text_reply(driver_phone, driver_msg)
 
+                    # Feature 5 (Proactive Follow-up)
+                    if not incident_ctx.get("followup_scheduled"):
+                        incident_ctx["followup_scheduled"] = True
+                        INCIDENT_DETAILS[inc_id] = incident_ctx
+                        _schedule_followup_check(inc_id)
+
                     return {"status": "success", "action": "Approved by manager and driver notified."}
 
                 elif "REJECT_" in payload_id:
@@ -1908,7 +2298,8 @@ async def whatsapp_webhook(request: Request):
                             issue_type=incident_ctx.get("issue_type", "N/A"),
                             severity=incident_ctx.get("severity", "N/A"),
                             cargo_type=incident_ctx.get("cargo_type", "N/A"),
-                            recommended_part=incident_ctx.get("recommended_part", "Standard Spare Kit")
+                            recommended_part=incident_ctx.get("recommended_part", "Standard Spare Kit"),
+                            predictive_alert=incident_ctx.get("predictive_alert")
                         )
                         return {
                             "status": "success",
@@ -1956,6 +2347,10 @@ async def whatsapp_webhook(request: Request):
                     is_driver = sender_10_digit in ACTIVE_VEHICLE_BY_PHONE
                     if is_driver:
                         incident_ctx["current_chatter"] = f"Driver of {ACTIVE_VEHICLE_BY_PHONE[sender_10_digit]}"
+                        # Feature 5 (Proactive Follow-up): har real driver message
+                        # par timestamp refresh karo, taaki pending follow-up
+                        # timer ko pata chale driver already update de chuka hai.
+                        DRIVER_LAST_UPDATE_TS[matched_inc_id] = time.time()
 
                     ai_result = call_ai_agent(text_body, incident_ctx)
                     resp = send_whatsapp_text_reply(raw_sender_phone, ai_result["reply_text"])
@@ -1972,7 +2367,21 @@ async def whatsapp_webhook(request: Request):
                             f"📍 *Driver Update — {vehicle_id}*\n\n\"{text_body}\""
                         )
 
-                    return {"status": "success", "action": "Smart AI agent replied to chatter.", "decision": ai_result["decision"]}
+                    # Feature 4 (Urgency Detection): agar AI ne is message ko
+                    # URGENT/CRITICAL classify kiya hai, manager ko turant ek
+                    # standalone escalation bhejo — DRIVER_STATUS_UPDATE forward
+                    # se independent, chahe decision kuch bhi ho.
+                    if is_driver and ai_result.get("urgency") in ("URGENT", "CRITICAL"):
+                        vehicle_id = ACTIVE_VEHICLE_BY_PHONE.get(sender_10_digit, incident_ctx.get("vehicle_id", "N/A"))
+                        icon = "🆘" if ai_result["urgency"] == "CRITICAL" else "⚠️"
+                        send_whatsapp_text_reply(
+                            MANAGER_WHATSAPP_NUMBER,
+                            f"{icon} *{ai_result['urgency']} ALERT — {vehicle_id}*\n\n"
+                            f"Driver message: \"{text_body}\"\n\n"
+                            f"Turant dhyaan dein / call karein."
+                        )
+
+                    return {"status": "success", "action": "Smart AI agent replied to chatter.", "decision": ai_result["decision"], "urgency": ai_result.get("urgency", "NORMAL")}
                 else:
                     send_whatsapp_text_reply(raw_sender_phone, "⚠️ No active fleet incident context found for your session.")
                     return {"status": "error", "action": "No active incident context found."}
