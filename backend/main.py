@@ -1046,10 +1046,13 @@ def call_ai_agent(manager_text: str, incident_ctx: dict) -> dict:
         "If they give an approval/rejection/reroute instruction, classify it accordingly. "
         "If the DRIVER is sharing a status/location/progress update (e.g. 'leaving for the hub now', "
         "'reached the workshop', 'on the way', 'running late') and asking or implying that the manager "
-        "should be told — classify this as DRIVER_STATUS_UPDATE. In reply_text for this case, only "
+        "should be told — classify this as DRIVER_STATUS_UPDATE. In reply_text for this case, "
         "confirm to the driver that you are passing it on RIGHT NOW ('Noted, informing your manager now') — "
         "never claim the manager has ALREADY been informed, since that message is sent separately, after "
-        "your reply, by the system itself.\n"
+        "your reply, by the system itself. ALSO add a short nudge asking the driver to also share their "
+        "live WhatsApp location (e.g. 'Kripya apna live location bhi share kar dein 📍'), since WhatsApp "
+        "only lets the driver share their own location by tapping the attachment/location option — the "
+        "system cannot pull or request it automatically.\n"
         "Classify their decision into exactly one of: APPROVED_AND_DISPATCHED, APPROVED_LOCAL_MECHANIC_REROUTED, "
         "REJECTED_REROUTING, INFO_REQUEST_ANSWERED (for questions/requests for info like phone numbers), "
         "DRIVER_STATUS_UPDATE (driver's location/progress update meant for the manager), "
@@ -1124,7 +1127,7 @@ def _keyword_fallback(text_body: str) -> dict:
     ]):
         return {
             "decision": "DRIVER_STATUS_UPDATE",
-            "reply_text": "Noted, informing your manager now."
+            "reply_text": "Noted, informing your manager now. Kripya apna live location bhi share kar dein 📍"
         }
     else:
         return {
